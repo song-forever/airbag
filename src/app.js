@@ -1,8 +1,9 @@
 import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
+import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.5.3';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.7.0';
 import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
@@ -24,6 +25,27 @@ const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motio
 const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
 const motionDetector=new FrameMotionDetector({width:160,height:90,threshold:.05});
 let motionState=null,motionSince=null,lastMotionAt=null;
+let zoomQuietUntil=0;
+const cameraZoom=new CameraZoom({onChange:renderCameraZoom,onTransition:resetMotionForZoom});
+function renderCameraZoom(state){
+ ui.cameraZoom.hidden=!stream||!state.supported;ui.zoomUnavailable.hidden=!stream||state.supported;
+ ui.zoomError.hidden=!state.error;ui.zoomError.textContent=state.error;
+ if(!state.supported)return;
+ const label=value=>Number(value.toFixed(2))+'×';
+ ui.zoomValue.textContent=label(state.value);ui.zoomRange.min=state.min;ui.zoomRange.max=state.max;ui.zoomRange.step=state.step;ui.zoomRange.value=state.value;
+ ui.zoomRange.setAttribute('aria-valuetext',label(state.value));ui.cameraZoom.setAttribute('aria-busy',String(state.busy));
+ ui.zoomPresets.replaceChildren();
+ const presets=[...new Set([state.min,...[1,2,3,5].filter(value=>value>=state.min&&value<=state.max)])];
+ for(const value of presets){const button=document.createElement('button');button.type='button';button.textContent=label(value);button.setAttribute('aria-label','相机变焦 '+label(value));button.setAttribute('aria-pressed',String(Math.abs(value-state.value)<Math.max(.01,state.step/2)));button.onclick=()=>cameraZoom.set(value);ui.zoomPresets.append(button);}
+}
+function resetMotionForZoom(){
+ zoomQuietUntil=performance.now()+1000;motionDetector.reset();motionState=null;motionSince=null;drawTarget(null);
+ if(armed&&departureAt!==null){
+  tracker.startFromMotion([],recordingStart);lastMotionAt=performance.now();
+  if(autoFinishReason!=='max_duration'){autoFinishAt=null;autoFinishReason='';}
+ }
+}
+ui.zoomRange.oninput=()=>cameraZoom.set(Number(ui.zoomRange.value));
 const formatTime = (t) => Number.isFinite(t) ? Math.floor(t/60).toString().padStart(2,'0') + ':' + Math.floor(t%60).toString().padStart(2,'0') : '00:00';
 const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 const reasons = {
@@ -139,6 +161,7 @@ function openCamera() {
    await ui.cameraVideo.play();
    if(document.hidden||generation!==cameraGeneration||stream!==acquired)throw new DOMException('相机准备已取消，请返回页面后重试。','AbortError');
    const settings=acquired.getVideoTracks()[0].getSettings();
+   cameraZoom.attach(acquired.getVideoTracks()[0]);
    ui.cameraQuality.textContent=(settings.width||'')+' × '+(settings.height||'')+' · '+Math.round(settings.frameRate||30)+' fps';
    ui.cameraBadge.innerHTML='<i></i> CAMERA READY';
    ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;ui.stopDetectionBtn.disabled=false;
@@ -159,6 +182,7 @@ function closeCamera() {
  cameraGeneration++;cameraOpenPromise=null;
  detectionActive=false;clearTimeout(inferenceTimer);
  if(stream){stopStream(stream);stream=null;}
+ cameraZoom.attach(null);
  ui.cameraVideo.srcObject=null;ui.cameraVideo.hidden=true;ui.cameraPlaceholder.hidden=false;ui.cameraStage.classList.remove('live');
  ui.cameraBadge.innerHTML='<i></i> CAMERA OFF';ui.cameraBadge.classList.remove('recording');ui.closeCameraBtn.hidden=true;
  const ctx=ui.trackingCanvas.getContext('2d');ctx.clearRect(0,0,ui.trackingCanvas.width,ui.trackingCanvas.height);
@@ -241,7 +265,9 @@ function detectLoop() {
  const started=performance.now();
  try{
   const video=ui.cameraVideo;
-  if(video.readyState>=2&&video.videoWidth){
+  const zoomSettling=cameraZoom.state.busy||performance.now()<zoomQuietUntil;
+  if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，等待画面稳定 · 尚未录像';
+  if(video.readyState>=2&&video.videoWidth&&!zoomSettling){
    const now=performance.now(),changed=detectFrameChange(video);if(changed)lastMotionAt=now;
    let detections=[];
    if(detector&&!analysisBusy&&!finishing){try{

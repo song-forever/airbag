@@ -19,7 +19,7 @@ http.createServer(async(req,res)=>{
   res.setHeader('Content-Type',mime[path.extname(file)]||'application/octet-stream');res.setHeader('Cache-Control','no-store');
   if(req.method==='HEAD'){res.end();return;}
   if(file===path.join(root,'index.html')){
-   const html=await readFile(file,'utf8');res.end(html.replace('<head>','<head><script src="/mock-provider.js"></script>'));
+   const html=await readFile(file,'utf8');res.end(html.replace('<head>','<head><script src="/mock-provider.js"></script><script src="/mock-camera.js"></script>'));
   }else createReadStream(file).pipe(res);
  }catch{res.statusCode=404;res.end('Not found');}
 }).listen(port,'127.0.0.1',()=>console.log('Local QA only: http://localhost:'+port+'/'));

@@ -13,8 +13,10 @@ for(const match of source.matchAll(/^import \{([^}]+)\} from '([^']+)';/gm)){con
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(match=>match[1]);
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
 async function settleUntil(predicate){for(let i=0;i<40&&!predicate();i++)await Promise.resolve();assert.ok(predicate(),'expected asynchronous lifecycle phase');}
-function fakeStream(){
- const track={readyState:'live',onended:null,stops:0,stop(){this.stops++;this.readyState='ended';},getSettings(){return {width:1280,height:720,frameRate:60};}};
+function fakeStream({zoom=false,applyZoom=async()=>{}}={}){
+ let zoomValue=1;
+ const track={readyState:'live',onended:null,stops:0,stop(){this.stops++;this.readyState='ended';},getSettings(){return {width:1280,height:720,frameRate:60,...(zoom?{zoom:zoomValue}:{})};}};
+ if(zoom){track.getCapabilities=()=>({zoom:{min:1,max:5,step:.1}});track.applyConstraints=async constraints=>{await applyZoom(constraints.zoom.exact);zoomValue=constraints.zoom.exact;};}
  return {track,getTracks:()=>[track],getVideoTracks:()=>[track]};
 }
 class Element extends EventTarget {
@@ -48,11 +50,14 @@ function fixture({getUserMedia,wakeRequest}={}){
   crypto:{randomUUID},performance:{now:()=>now},localStorage:{getItem:()=>null,setItem(){}},
   JumpTracker:class {reset(){}startFromMotion(){}update(){return {state:'waiting',target:null,reason:'searching'};}},
   setTimeout:fn=>addTimer('timeout',fn),setInterval:fn=>addTimer('interval',fn),clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),confirm:()=>true});
- vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nthis.testAPI={openCamera,closeCamera,armCapture,startMotionRecording,queueAutoFinish,finishCapture,finalizeRecording,
-  snapshot:()=>({stream,armed,finishing,activeCapture:typeof activeCapture==='undefined'?null:activeCapture,records,armTimer,wakeLock,detectionActive}),
+ vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nthis.testAPI={openCamera,closeCamera,armCapture,startMotionRecording,queueAutoFinish,finishCapture,finalizeRecording,detectLoop,
+  zoom:value=>cameraZoom.set(value),
+  snapshot:()=>({stream,armed,finishing,activeCapture:typeof activeCapture==='undefined'?null:activeCapture,records,armTimer,wakeLock,detectionActive,zoom:{...cameraZoom.state},zoomQuietUntil,motionSince,autoFinishAt,autoFinishReason}),
   mockProcessing:()=>{getVideoMetadata=async()=>({duration:6,width:1280,height:720});getPoster=async()=>'';persistRecord=async()=>true;selectRecord=async record=>{current=record;};},
   deferSave:promise=>{getVideoMetadata=()=>promise;},
-  setDetector:()=>{detector={detectForVideo:()=>({detections:[]})};}};`,context);
+  setMotion:moving=>{motionDetector.update=()=>({moving,ready:true,cameraMoving:false,changedRatio:moving ? .2 : 0});},
+  setTrackerResult:result=>{tracker.update=()=>result;},
+  setDetector:(onDetect=()=>{})=>{detector={detectForVideo:()=>{onDetect();return {detections:[]};}};}};`,context);
  context.testAPI.setDetector();context.testAPI.mockProcessing();
  return {api:context.testAPI,document,window,nodes,recorders,timers,setNow:value=>now=value};
 }
@@ -160,4 +165,49 @@ test('automatic video completion retains the tail and leaves detection active',a
  f.setNow(14000);tick();assert.equal(recorder.state,'inactive');await recorder.onstop();
  assert.equal(f.api.snapshot().records.length,1);assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,true);assert.equal(f.api.snapshot().stream.track.stops,0);
  f.nodes.stopDetectionBtn.onclick();assert.equal(f.api.snapshot().stream,null);
+});
+
+test('zooming while waiting suppresses motion-triggered recording and inference until the image settles',async()=>{
+ const applied=deferred();let constraints=0,inferences=0;
+ const stream=fakeStream({zoom:true,applyZoom:()=>{constraints++;return applied.promise;}});
+ const f=fixture({getUserMedia:async()=>stream});await f.api.armCapture();
+ f.api.setDetector(()=>inferences++);f.api.setMotion(true);
+ const zoom=f.api.zoom(2);await settleUntil(()=>constraints===1);
+ for(const now of [1500,2000,3000]){f.setNow(now);f.api.detectLoop();}
+ assert.equal(f.recorders.length,0);assert.equal(inferences,0);assert.equal(f.api.snapshot().motionSince,null);
+ applied.resolve();await zoom;
+ f.setNow(3999);f.api.detectLoop();assert.equal(f.recorders.length,0);assert.equal(inferences,0);
+ // Sustained subject motion may start a recording once the zoom has settled.
+ f.setNow(4001);f.api.detectLoop();f.setNow(4501);f.api.detectLoop();
+ assert.equal(f.recorders.length,1);assert.equal(inferences,2);
+ f.api.finishCapture('manual',true);await f.recorders[0].onstop();
+});
+
+test('zoom preserves the active recorder stream and suspends motion completion without removing the duration safety limit',async()=>{
+ const applied=deferred();let constraints=0,inferences=0;
+ const stream=fakeStream({zoom:true,applyZoom:()=>{constraints++;return applied.promise;}});
+ const f=fixture({getUserMedia:async()=>stream});await f.api.armCapture();f.api.startMotionRecording([]);
+ const recorder=f.recorders[0],tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
+ f.api.setDetector(()=>inferences++);f.api.setTrackerResult({state:'complete',target:null,reason:'visible_arc_finished'});
+ f.api.queueAutoFinish('motion_finished',11000);f.setNow(12000);
+ const zoom=f.api.zoom(2);await settleUntil(()=>constraints===1);
+ assert.equal(f.api.snapshot().autoFinishAt,null);
+ f.setNow(15000);f.api.detectLoop();tick();
+ assert.equal(inferences,0);assert.equal(f.api.snapshot().autoFinishAt,null);assert.equal(recorder.state,'recording');
+ assert.equal(recorder.stream,stream);assert.equal(f.api.snapshot().stream,stream);assert.equal(stream.track.stops,0);
+ f.setNow(46000);tick();assert.equal(f.api.snapshot().autoFinishReason,'max_duration');assert.equal(recorder.state,'recording');
+ f.setNow(49000);tick();assert.equal(recorder.state,'inactive');
+ await recorder.onstop();applied.resolve();await zoom;
+});
+
+test('a zoom completion from a closed camera cannot change the new camera or its motion cooldown',async()=>{
+ const applied=deferred();let requests=0,changes=0;
+ const old=fakeStream({zoom:true,applyZoom:()=>{changes++;return applied.promise;}}),current=fakeStream({zoom:true});
+ const f=fixture({getUserMedia:async()=>++requests===1?old:current});await f.api.openCamera();
+ const zoom=f.api.zoom(2);await settleUntil(()=>changes===1);f.api.closeCamera();f.setNow(5000);await f.api.openCamera();
+ const quiet=f.api.snapshot().zoomQuietUntil;
+ applied.resolve();await zoom;
+ const state=f.api.snapshot();assert.equal(state.stream,current);assert.equal(state.zoom.value,1);assert.equal(state.zoom.busy,false);
+ assert.equal(state.zoomQuietUntil,quiet);assert.equal(old.track.stops,1);assert.equal(current.track.stops,0);
+ f.api.closeCamera();
 });

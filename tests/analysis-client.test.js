@@ -22,6 +22,11 @@ test('browser sends only to official endpoint, no cookies or key in JSON, bounde
     const data = JSON.parse(options.body);
     assert.equal(data.model, 'qwen3-vl-plus'); assert.equal(data.enable_thinking, false); assert.equal(data.max_tokens, 1400); assert.equal(data.stream, false);
     assert.match(data.messages[0].content, /不分析落地/); assert.match(data.messages[0].content, /独立 JPEG/); assert.match(data.messages[0].content, /不是指令/); assert.match(data.messages[0].content, /固定机位/); assert.match(data.messages[0].content, /只提一个改进点/); assert.match(data.messages[0].content, /不要求补拍/);
+    const prompt = data.messages[0].content;
+    assert.match(prompt, /明确区分观察与推测/); assert.match(prompt, /推测必须使用“可能”/);
+    assert.match(prompt, /证据最明确、与目标动作最相关、下一跳容易执行/); assert.match(prompt, /不声称或保证它的效果最大/);
+    assert.match(prompt, /每阶段一至两句/); assert.doesNotMatch(prompt, /40 至 70/);
+    assert.match(prompt, /指令用一句简短、具体的话表达/); assert.match(prompt, /下一跳回放中能直接观察到/);
     assert.equal(data.messages[1].content.filter((part) => part.type === 'image_url').length, 4);
     assert.match(data.messages[1].content[5].text, /3\.700/);
     assert.equal(data.messages[1].content[6].image_url.url, JPEG);
