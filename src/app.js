@@ -1,3 +1,4 @@
+import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
@@ -14,6 +15,7 @@ let detectionActive=false;
 let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
+let cameraOpenPromise=null,cameraGeneration=0;
 let analysisController = null, analysisBusy = false, analysisRun = 0;
 const MIN_RECORDING_MS=10000,MAX_RECORDING_MS=45000,END_TAIL_MS=3000;
 let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
@@ -116,26 +118,47 @@ function keepAwake() {
  wakeLockPending=pending;return pending;
 }
 function releaseAwake(){wakeLockGeneration++;wakeLockPending=null;const lock=wakeLock;wakeLock=null;if(lock)lock.release().catch(()=>{});}
-async function openCamera() {
- if(stream)return;
- if(!window.isSecureContext)throw new Error('拍摄需要 HTTPS 链接，请通过已发布的网站打开。');
- if(!navigator.mediaDevices?.getUserMedia)throw new Error('当前浏览器不支持网页拍摄，请用 Safari 打开，或导入已有视频。');
- status('正在请求摄像头权限…');
- try {
-  stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60,max:60}}});
-  ui.cameraVideo.srcObject=stream;ui.cameraVideo.hidden=false;ui.cameraPlaceholder.hidden=true;ui.cameraStage.classList.add('live');
-  await ui.cameraVideo.play();
-  const settings=stream.getVideoTracks()[0].getSettings();
-  ui.cameraQuality.textContent=(settings.width||'')+' × '+(settings.height||'')+' · '+Math.round(settings.frameRate||30)+' fps';
-  ui.cameraBadge.innerHTML='<i></i> CAMERA READY';
-  ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;ui.stopDetectionBtn.disabled=false;
-  stream.getVideoTracks()[0].onended=()=>{if(armed)finishCapture('track_ended');else closeCamera();};
- }catch(err){closeCamera();if(err.name==='NotAllowedError')throw new Error('摄像头权限未开启。请在 Safari 网站设置中允许相机，再重试。');if(err.name==='NotReadableError')throw new Error('摄像头暂时不可用，请关闭其他正在使用相机的应用。');throw err;}
+function stopStream(value){value?.getTracks().forEach(track=>{track.onended=null;if(track.readyState!=='ended')track.stop();});}
+function openCamera() {
+ if(cameraOpenPromise)return cameraOpenPromise;
+ if(stream)return Promise.resolve(stream);
+ const generation=++cameraGeneration;
+ let acquired=null;
+ // Defer the body until the shared promise has been assigned, including when
+ // feature checks fail synchronously before getUserMedia is reached.
+ const operation=Promise.resolve().then(async()=>{
+  try {
+   if(!window.isSecureContext)throw new Error('拍摄需要 HTTPS 链接，请通过已发布的网站打开。');
+   if(!navigator.mediaDevices?.getUserMedia)throw new Error('当前浏览器不支持网页拍摄，请用 Safari 打开，或导入已有视频。');
+   if(document.hidden||generation!==cameraGeneration)throw new DOMException('相机准备已取消，请返回页面后重试。','AbortError');
+   status('正在请求摄像头权限…');
+   acquired=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60,max:60}}});
+   if(document.hidden||generation!==cameraGeneration)throw new DOMException('相机准备已取消，请返回页面后重试。','AbortError');
+   stream=acquired;
+   ui.cameraVideo.srcObject=acquired;ui.cameraVideo.hidden=false;ui.cameraPlaceholder.hidden=true;ui.cameraStage.classList.add('live');
+   await ui.cameraVideo.play();
+   if(document.hidden||generation!==cameraGeneration||stream!==acquired)throw new DOMException('相机准备已取消，请返回页面后重试。','AbortError');
+   const settings=acquired.getVideoTracks()[0].getSettings();
+   ui.cameraQuality.textContent=(settings.width||'')+' × '+(settings.height||'')+' · '+Math.round(settings.frameRate||30)+' fps';
+   ui.cameraBadge.innerHTML='<i></i> CAMERA READY';
+   ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;ui.stopDetectionBtn.disabled=false;
+   acquired.getVideoTracks()[0].onended=()=>{if(stream!==acquired)return;if(armed)finishCapture('track_ended');else closeCamera();};
+   return acquired;
+  }catch(err){
+   if(generation===cameraGeneration)closeCamera();
+   if(acquired!==stream)stopStream(acquired);
+   if(err.name==='NotAllowedError')throw new Error('摄像头权限未开启。请在 Safari 网站设置中允许相机，再重试。');
+   if(err.name==='NotReadableError')throw new Error('摄像头暂时不可用，请关闭其他正在使用相机的应用。');
+   throw err;
+  }finally{if(cameraOpenPromise===operation)cameraOpenPromise=null;}
+ });
+ cameraOpenPromise=operation;return operation;
 }
 function closeCamera() {
  if(armed)return;
+ cameraGeneration++;cameraOpenPromise=null;
  detectionActive=false;clearTimeout(inferenceTimer);
- if(stream){stream.getTracks().forEach(track=>{track.onended=null;track.stop();});stream=null;}
+ if(stream){stopStream(stream);stream=null;}
  ui.cameraVideo.srcObject=null;ui.cameraVideo.hidden=true;ui.cameraPlaceholder.hidden=false;ui.cameraStage.classList.remove('live');
  ui.cameraBadge.innerHTML='<i></i> CAMERA OFF';ui.cameraBadge.classList.remove('recording');ui.closeCameraBtn.hidden=true;
  const ctx=ui.trackingCanvas.getContext('2d');ctx.clearRect(0,0,ui.trackingCanvas.width,ui.trackingCanvas.height);
@@ -406,17 +429,12 @@ async function extractFrames(record,signal) {
   const times=getFrameTimes(duration),count=times.length,c=document.createElement('canvas'),scale=Math.min(1,960/Math.max(v.videoWidth,v.videoHeight));
   c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));const ctx=c.getContext('2d',{alpha:false});
   // Leave room for JSON, prompts and timestamps below the endpoint's 16 MiB limit.
-  const frameBudget=Math.min(MAX_FRAME_BYTES,Math.floor((MAX_BODY_BYTES-128*1024)*3/(4*count)));
+  const frameBudget=getFrameByteBudget({frameCount:count,maxBodyBytes:MAX_BODY_BYTES,maxFrameBytes:MAX_FRAME_BYTES});
   for(let i=0;i<count;i++){
    if(signal.aborted)throw new DOMException('Aborted','AbortError');
    const relative=times[i];await seekVideo(v,start+relative,signal);
    ctx.drawImage(v,0,0,c.width,c.height);
-   let dataUrl=c.toDataURL('image/jpeg',.76),quality=.76;
-   while(dataUrl.length>frameBudget*4/3+23&&quality>.4){quality-=.12;dataUrl=c.toDataURL('image/jpeg',quality);}
-   if(dataUrl.length>frameBudget*4/3+23){
-    const smaller=document.createElement('canvas');let shrink=.8;
-    do{smaller.width=Math.max(1,Math.round(c.width*shrink));smaller.height=Math.max(1,Math.round(c.height*shrink));smaller.getContext('2d',{alpha:false}).drawImage(c,0,0,smaller.width,smaller.height);dataUrl=smaller.toDataURL('image/jpeg',.64);shrink*=.8;}while(dataUrl.length>frameBudget*4/3+23);
-   }
+   const dataUrl=await encodeFrame(c,{maxBytes:frameBudget,createCanvas:()=>document.createElement('canvas'),signal});
    frames.push({time:relative,dataUrl});
    ui.analysisMeter.value=Math.round((i+1)/count*55);ui.progressDetail.textContent='正在抽取画面 '+(i+1)+' / '+count+'，原片不上传。';await sleep(0);
   }

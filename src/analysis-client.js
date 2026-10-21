@@ -161,8 +161,8 @@ function providerError(status) {
   if ([400, 404, 422].includes(status)) return problem('provider_request_rejected', '百炼模型未接受本次分析，请检查模型是否可用、账户余额及免费额度，或减少分析画面后重试。', status);
   return problem('provider_unavailable', '百炼模型服务暂时不可用，请稍后重试；视频仍保存在本机。', status);
 }
-async function readResponseJson(response) {
-  const isEventStream = response.headers.get('content-type')?.includes('text/event-stream');
+async function readResponseJson(response,signal) {
+  const isEventStream = response.headers.get('content-type')?.toLowerCase().includes('text/event-stream');
   // SSE includes event envelopes and discarded reasoning, so its wire limit is larger.
   const wireLimit = isEventStream ? 4 * 1024 * 1024 : MAX_RESPONSE_BYTES;
   const length = response.headers.get('content-length');
@@ -173,9 +173,14 @@ async function readResponseJson(response) {
   if (!response.body) throw problem('invalid_provider_response', '百炼模型返回了空结果，请重试。');
   const reader = response.body.getReader(), chunks = [];
   let count = 0;
+  const onAbort = () => { reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   try {
     while (true) {
+      if (signal?.aborted) throw cancelled();
       const { done, value } = await reader.read();
+      if (signal?.aborted) throw cancelled();
       if (done) break;
       count += value.byteLength;
       if (count > wireLimit) {
@@ -184,7 +189,11 @@ async function readResponseJson(response) {
       }
       chunks.push(value);
     }
-  } finally { reader.releaseLock(); }
+  } catch (error) {
+    if (signal?.aborted) throw cancelled();
+    if (error instanceof AnalysisError) throw error;
+    throw problem('invalid_provider_response', '百炼模型响应在读取途中中断，请重试。');
+  } finally { signal?.removeEventListener('abort', onAbort); reader.releaseLock(); }
   const bytes = new Uint8Array(count);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -196,7 +205,9 @@ async function readResponseJson(response) {
       return data;
     }
     let content = '', usage, ended = false;
-    for (const event of body.replaceAll('\r\n', '\n').split('\n\n')) {
+    const events = body.replace(/\r\n?/g, '\n').split('\n\n');
+    events.pop(); // An EOF fragment without its empty-line delimiter is incomplete.
+    for (const event of events) {
       const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
       if (!data) continue;
       if (data === '[DONE]') continue;
@@ -242,11 +253,13 @@ export async function analyzeFrames(payload, { signal, fetchImpl = fetch, timeou
       redirect: 'error',
       signal: controller.signal,
     });
+    if (controller.signal.aborted) throw cancelled();
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       throw providerError(response.status);
     }
-    const data = await readResponseJson(response);
+    const data = await readResponseJson(response, controller.signal);
+    if (controller.signal.aborted) throw cancelled();
     const analysis = parseAnalysis(data?.choices?.[0]?.message?.content, validated.frames);
     const usage = parseUsage(data.usage);
     return {

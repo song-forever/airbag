@@ -139,3 +139,131 @@ test('incomplete, duplicate, empty and landing stages cannot replace the request
     await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => upstream(content({ stages: invalidStages })) }), 'invalid_analysis');
   }
 });
+
+const eventResponse = (events, { newline = '\n', terminate = true, contentType = 'text/event-stream' } = {}) => {
+  const body = events.map(event => 'data: ' + JSON.stringify(event)).join(newline + newline)
+    + (terminate ? newline + newline : '');
+  return new Response(body, { headers: { 'content-type': contentType } });
+};
+const completedEvent = () => ({ choices: [{ delta: { content: content() }, finish_reason: 'stop' }] });
+
+test('cancelled requests cannot publish an already-buffered response', async () => {
+  const controller = new AbortController();
+  await rejectsCode(analyzeFrames(input(), { signal: controller.signal, fetchImpl: async () => {
+    const response = upstream();
+    controller.abort();
+    return response;
+  } }), 'analysis_cancelled');
+});
+
+test('response-body transport failures are invalid responses after headers arrive', async () => {
+  let failedBody;
+  const response = new Response(new ReadableStream({
+    start(controller) { failedBody = controller; controller.enqueue(new TextEncoder().encode('{"choices":')); },
+    pull() { failedBody.error(new TypeError('terminated ' + KEY)); },
+  }));
+  await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => response }), 'invalid_provider_response');
+  assert.equal(response.body.locked, false);
+});
+
+test('SSE accepts CR event separators permitted by the event-stream format', async () => {
+  const result = await analyzeFrames(input(), { fetchImpl: async () => eventResponse([
+    completedEvent(), { choices: [], usage: { prompt_tokens: 7, completion_tokens: 8, total_tokens: 15 } },
+  ], { newline: '\r' }) });
+  assert.deepEqual(result.analysis.nextJump, nextJump);
+  assert.equal(result.usage.total_tokens, 15);
+});
+
+test('SSE must not dispatch a final event cut off before its empty-line delimiter', async () => {
+  await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => eventResponse([completedEvent()], { terminate: false }) }), 'invalid_provider_response');
+});
+
+test('SSE MIME types are case insensitive', async () => {
+  const result = await analyzeFrames(input(), { fetchImpl: async () => eventResponse([completedEvent()], { contentType: 'Text/Event-Stream; charset=UTF-8' }) });
+  assert.deepEqual(result.analysis.nextJump, nextJump);
+});
+
+test('default and extended timeouts stop at the 90 second ceiling without wall-clock waiting', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let settled = 0;
+  const checks = [undefined, 120_000].map(timeoutMs => rejectsCode(
+    analyzeFrames(input(), { fetchImpl: pendingFetch, timeoutMs }).finally(() => { settled++; }), 'analysis_timeout'));
+  t.mock.timers.tick(89_999);
+  await Promise.resolve();
+  assert.equal(settled, 0);
+  t.mock.timers.tick(1);
+  await Promise.all(checks);
+  assert.equal(settled, 2);
+});
+
+test('a timeout cannot publish a response buffered at the deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => {
+    const response = upstream();
+    t.mock.timers.tick(90_000);
+    return response;
+  } }), 'analysis_timeout');
+});
+
+test('cancellation stops a pending response reader even when the body does not subscribe to fetch abort', async () => {
+  const controller = new AbortController();
+  let bodyCancelled = false, response, readerStarted;
+  const started = new Promise(resolve => { readerStarted = resolve; });
+  const request = analyzeFrames(input(), { signal: controller.signal, fetchImpl: async () => {
+    response = new Response(new ReadableStream({
+      pull() { readerStarted(); },
+      cancel() { bodyCancelled = true; },
+    }, { highWaterMark: 0 }));
+    return response;
+  }, timeoutMs: 25 });
+  await started;
+  controller.abort();
+  await rejectsCode(request, 'analysis_cancelled');
+  assert.equal(bodyCancelled, true);
+  assert.equal(response.body.locked, false);
+});
+
+test('UTF-8 split across transport chunks and multiline SSE fields preserve the single suggestion', async () => {
+  const encode = new TextEncoder();
+  const serialized = JSON.stringify(completedEvent());
+  const body = ': heartbeat\r\n\r\nevent: message\r\ndata: ' + serialized.slice(0, 11)
+    + '\r\ndata: ' + serialized.slice(11) + '\r\n\r\ndata: [DONE]\r\n\r\n';
+  const bytes = encode.encode(body);
+  let offset = 0;
+  const response = new Response(new ReadableStream({ pull(controller) {
+    if (offset === bytes.length) { controller.close(); return; }
+    controller.enqueue(bytes.slice(offset, offset + 7)); offset = Math.min(offset + 7, bytes.length);
+  } }), { headers: { 'content-type': 'text/event-stream' } });
+  const result = await analyzeFrames(input(), { fetchImpl: async () => response });
+  assert.deepEqual(result.analysis.nextJump, nextJump);
+  assert.equal(response.body.locked, false);
+});
+
+test('SSE errors, filters and truncated content never replace the previous successful result', async () => {
+  const previous = await analyzeFrames(input(), { fetchImpl: async () => upstream() });
+  const snapshot = structuredClone(previous);
+  let saved = previous;
+  const failures = [
+    () => eventResponse([{ choices: [{ delta: { content: content() } }] }]),
+    () => eventResponse([{ choices: [{ delta: { content: content() }, finish_reason: 'length' }] }]),
+    () => eventResponse([{ choices: [{ delta: { content: content() }, finish_reason: 'content_filter' }] }]),
+    () => eventResponse([completedEvent(), { error: { message: 'provider internals ' + KEY } }]),
+    () => new Response('data: {"choices":\n\n', { headers: { 'content-type': 'text/event-stream' } }),
+  ];
+  for (const response of failures) {
+    await rejectsCode((async () => { saved = await analyzeFrames(input(), { fetchImpl: async () => response() }); })(), 'invalid_provider_response');
+    assert.equal(saved, previous);
+    assert.deepEqual(saved, snapshot);
+  }
+});
+
+test('body byte limits cancel the stream, release its reader, and do not leak provider payload', async () => {
+  let bodyCancelled = false;
+  const response = new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1)); },
+    cancel() { bodyCancelled = true; },
+  }), { headers: { 'content-type': 'text/event-stream' } });
+  await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => response }), 'provider_response_too_large');
+  assert.equal(bodyCancelled, true);
+  assert.equal(response.body.locked, false);
+});
