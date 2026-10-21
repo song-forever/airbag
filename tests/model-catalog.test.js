@@ -5,7 +5,7 @@ import { analyzeFrames, estimateCostCny } from '../src/analysis-client.js';
 const key='sk-test-only-not-a-real-key-12345';
 const jpeg='data:image/jpeg;base64,'+Buffer.from([255,216,255,224,1,2,255,217]).toString('base64');
 const payload=model=>({apiKey:key,model,duration:6,action:'直飞',frames:[0,1,3,5].map(time=>({time,dataUrl:jpeg}))});
-const answer=JSON.stringify({summary:'可见起跳过程',observations:[{time:3,evidence:'画面可见',certainty:'画面明确'}],focus:'回看起跳',limitations:[]});
+const answer=JSON.stringify({nextJump:{instruction:'保持肩线稳定',reason:'本跳腾空肩线平稳',check:'肩线是否同样平稳',time:3}});
 function sse(answerText=answer){return new Response([
  'data: '+JSON.stringify({choices:[{delta:{reasoning_content:'PRIVATE REASONING'}}]})+'\r\n\r\n',
  'data: '+JSON.stringify({choices:[{delta:{content:answerText.slice(0,17)}}]})+'\r\n\r\n',
@@ -32,7 +32,7 @@ test('every catalog model constructs a compatible request and returns the select
    if(config.omni){assert.deepEqual(request.modalities,['text']);const video=request.messages[1].content.find(x=>x.type==='video');assert.equal(video.video.length,4);}
    return config.stream?sse():new Response(JSON.stringify({choices:[{message:{content:answer}}],usage:{prompt_tokens:2000,completion_tokens:100,total_tokens:2100}}));
   }});
-  assert.equal(result.model,config.id);assert.equal(result.analysis.summary,'可见起跳过程');assert.equal(result.usage.total_tokens,2100);assert.ok(!JSON.stringify(result).includes('PRIVATE REASONING'));
+  assert.equal(result.model,config.id);assert.equal(result.analysis.nextJump.instruction,'保持肩线稳定');assert.equal(result.usage.total_tokens,2100);assert.ok(!JSON.stringify(result).includes('PRIVATE REASONING'));
  });
 });
 test('text-only models never send video material',async()=>{
@@ -57,7 +57,7 @@ test('truncated JSON answers fail, while SSE reasoning envelopes can exceed the 
  const reasoning='data: '+JSON.stringify({choices:[{delta:{reasoning_content:'r'.repeat(300*1024)}}]})+'\n\n';
  const streamText=reasoning+await sse().text();
  const result=await analyzeFrames(payload('kimi-k2.7-code'),{fetchImpl:async()=>new Response(streamText,{headers:{'content-type':'text/event-stream','content-length':String(Buffer.byteLength(streamText))}})});
- assert.equal(result.analysis.summary,'可见起跳过程');
+ assert.equal(result.analysis.nextJump.instruction,'保持肩线稳定');
 });
 test('unknown future versions never inherit prices and filtered streams never report success',async()=>{
  assert.equal(estimateCostCny({prompt_tokens:10000,completion_tokens:1000},'qwen3-vl-plus-unknown-future'),null);

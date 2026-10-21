@@ -1,5 +1,6 @@
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames } from './analysis-client.js';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js';
+import { getFrameTimes } from './frame-sampling.js';
 import { JumpTracker } from './tracker.js';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
@@ -287,20 +288,17 @@ function renderAnalysis() {
  ui.analyzeBtn.textContent=data?'重新分析这一跳 ↗':'分析这一跳 ↗';
  if(!data)return;
  const a=data.analysis;
- if(a.rawText){appendText(result,'div',a.rawText,'raw-result');}
- else {
-  appendText(result,'p',a.summary||'分析已完成','result-summary');
-  for(const item of (Array.isArray(a.observations)?a.observations:[])){
-   const row=document.createElement('div');row.className='observation';const head=document.createElement('div');head.className='observation-head';
-   const t=Number(item.time);if(Number.isFinite(t)){const button=appendText(head,'button',t.toFixed(1)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
-   appendText(head,'span',item.certainty||'画面观察','certainty');row.append(head);
-   appendText(row,'p',item.evidence||'');if(item.interpretation)appendText(row,'p',item.interpretation,'inference');result.append(row);
-  }
-  if(a.focus){const box=document.createElement('div');box.className='focus-box';appendText(box,'small','下次只关注这一点');appendText(box,'p',a.focus);result.append(box);}
-  if(Array.isArray(a.limitations)&&a.limitations.length)appendText(result,'p','判断范围：'+a.limitations.join('；'),'limitations');
+ if(a?.schemaVersion===2&&a.nextJump){
+  const next=a.nextJump,box=document.createElement('div');box.className='focus-box';
+  appendText(box,'small','下一跳，只做这一件事');appendText(box,'p',next.instruction);result.append(box);
+  appendText(result,'p',next.reason);
+  const t=next.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(result,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
+  appendText(result,'p','回来检查：'+next.check);
+ }else{
+  appendText(result,'p','这是一份旧版报告，重新分析即可生成下一跳的单点建议。');
  }
  if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+frame.time;ui.reviewVideo.pause();};strip.append(btn);}result.append(strip);}
- const u=data.usage||{};appendText(result,'div',data.model+' · 抽帧分析，非逐帧结论\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
+ const u=data.usage||{};appendText(result,'div',data.model+(data.frameCount?' · '+data.frameCount+' 张画面':'')+'\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
 }
 async function extractFrames(record,signal) {
  const start=record.trimStart,end=record.trimEnd,duration=end-start;
@@ -309,12 +307,21 @@ async function extractFrames(record,signal) {
  const url=URL.createObjectURL(record.blob);v.src=url;let frames=[];
  try {
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('视频加载超时')),10000);const onAbort=()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));};signal.addEventListener('abort',onAbort,{once:true});v.onloadeddata=()=>{clearTimeout(timer);signal.removeEventListener('abort',onAbort);resolve();};v.onerror=()=>{clearTimeout(timer);signal.removeEventListener('abort',onAbort);reject(new Error('无法读取视频画面，请使用兼容的 MP4 视频。'));};});
-  const count=Math.min(32,Math.max(8,Math.ceil(duration*6))),c=document.createElement('canvas'),scale=Math.min(1,960/Math.max(v.videoWidth,v.videoHeight));
+  const times=getFrameTimes(duration),count=times.length,c=document.createElement('canvas'),scale=Math.min(1,960/Math.max(v.videoWidth,v.videoHeight));
   c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));const ctx=c.getContext('2d',{alpha:false});
+  // Leave room for JSON, prompts and timestamps below the endpoint's 16 MiB limit.
+  const frameBudget=Math.min(MAX_FRAME_BYTES,Math.floor((MAX_BODY_BYTES-128*1024)*3/(4*count)));
   for(let i=0;i<count;i++){
    if(signal.aborted)throw new DOMException('Aborted','AbortError');
-   const relative=Math.max(.01,(duration-.08)*i/(count-1));await seekVideo(v,start+relative,signal);
-   ctx.drawImage(v,0,0,c.width,c.height);frames.push({time:Number(relative.toFixed(3)),dataUrl:c.toDataURL('image/jpeg',.76)});
+   const relative=times[i];await seekVideo(v,start+relative,signal);
+   ctx.drawImage(v,0,0,c.width,c.height);
+   let dataUrl=c.toDataURL('image/jpeg',.76),quality=.76;
+   while(dataUrl.length>frameBudget*4/3+23&&quality>.4){quality-=.12;dataUrl=c.toDataURL('image/jpeg',quality);}
+   if(dataUrl.length>frameBudget*4/3+23){
+    const smaller=document.createElement('canvas');let shrink=.8;
+    do{smaller.width=Math.max(1,Math.round(c.width*shrink));smaller.height=Math.max(1,Math.round(c.height*shrink));smaller.getContext('2d',{alpha:false}).drawImage(c,0,0,smaller.width,smaller.height);dataUrl=smaller.toDataURL('image/jpeg',.64);shrink*=.8;}while(dataUrl.length>frameBudget*4/3+23);
+   }
+   frames.push({time:relative,dataUrl});
    ui.analysisMeter.value=Math.round((i+1)/count*55);ui.progressDetail.textContent='正在抽取画面 '+(i+1)+' / '+count+'，原片不上传。';await sleep(0);
   }
   return frames;

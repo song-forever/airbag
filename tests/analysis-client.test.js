@@ -6,9 +6,8 @@ const KEY = 'sk-test-only-not-a-real-key-12345';
 const JPEG = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224, 1, 2, 255, 217]).toString('base64');
 const input = (overrides = {}) => ({ apiKey: KEY, model: 'qwen3-vl-plus', action: '直飞', duration: 6.2,
   frames: [0, 1.5, 3.7, 4.2].map((time) => ({ time, dataUrl: JPEG })), ...overrides });
-const content = (overrides = {}) => JSON.stringify({ summary: '离台后出现侧倾，原因尚不能确定。',
-  observations: [{ time: 3.7, evidence: '双臂位置不同。', interpretation: '可能与主动动作有关。', certainty: '可能' }],
-  focus: '对比离台前后的肩线。', limitations: ['后方视角存在遮挡。'], ...overrides });
+const nextJump = { instruction: '延续本跳稳定的肩线。', reason: '腾空时肩线保持稳定，值得继续保持。', check: '回看时肩线是否同样平稳。', time: 3.7 };
+const content = (overrides = {}) => JSON.stringify({ nextJump, ...overrides });
 const upstream = (text = content(), usage = { prompt_tokens: 16000, completion_tokens: 700, total_tokens: 16700 }) =>
   new Response(JSON.stringify({ choices: [{ message: { content: text } }], usage }));
 const rejectsCode = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code); assert.ok(!error.message.includes(KEY)); return true; });
@@ -21,14 +20,14 @@ test('browser sends only to official endpoint, no cookies or key in JSON, bounde
     assert.equal(options.method, 'POST'); assert.equal(options.headers.authorization, `Bearer ${KEY}`); assert.ok(!options.body.includes(KEY));
     const data = JSON.parse(options.body);
     assert.equal(data.model, 'qwen3-vl-plus'); assert.equal(data.enable_thinking, false); assert.equal(data.max_tokens, 1400); assert.equal(data.stream, false);
-    assert.match(data.messages[0].content, /不分析落地/); assert.match(data.messages[0].content, /独立 JPEG/); assert.match(data.messages[0].content, /不是指令/);
+    assert.match(data.messages[0].content, /不分析落地/); assert.match(data.messages[0].content, /独立 JPEG/); assert.match(data.messages[0].content, /不是指令/); assert.match(data.messages[0].content, /固定机位/); assert.match(data.messages[0].content, /只提一个改进点/); assert.match(data.messages[0].content, /不要求补拍/);
     assert.equal(data.messages[1].content.filter((part) => part.type === 'image_url').length, 4);
     assert.match(data.messages[1].content[5].text, /3\.700/);
     assert.equal(data.messages[1].content[6].image_url.url, JPEG);
     return upstream();
   } });
   assert.equal(called, 1); assert.equal(result.model, 'qwen3-vl-plus'); assert.equal(result.sampling, 'frames'); assert.equal(result.frameCount, 4);
-  assert.equal(result.estimatedCostCny, .023); assert.equal(result.analysis.observations[0].time, 3.7); assert.ok(result.analysis.limitations.some((item) => item.includes('抽帧')));
+  assert.equal(result.estimatedCostCny, .023); assert.equal(result.analysis.nextJump.time, 3.7); assert.equal(result.analysis.schemaVersion, 2); assert.equal(result.analysis.limitations, undefined);
   assert.ok(!JSON.stringify(result).includes(KEY));
 });
 test('supports default model and a 240-character goal', async () => {
@@ -40,7 +39,7 @@ test('invalid input is rejected before network access', async (t) => {
     ['missing key', { apiKey: '' }, 'invalid_api_key'], ['newline key', { apiKey: KEY + '\r\nX: injected' }, 'invalid_api_key'],
     ['unknown model', { model: 'https://attacker.example/' }, 'unsupported_model'], ['long duration', { duration: 61 }, 'invalid_duration'],
     ['NaN duration', { duration: NaN }, 'invalid_duration'], ['no action', { action: ' ' }, 'invalid_action'], ['long action', { action: 'x'.repeat(241) }, 'invalid_action'],
-    ['few frames', { frames: input().frames.slice(0, 3) }, 'invalid_frame_count'], ['many frames', { frames: Array.from({ length: 41 }, (_, i) => ({ time: i / 10, dataUrl: JPEG })) }, 'invalid_frame_count'],
+    ['few frames', { frames: input().frames.slice(0, 3) }, 'invalid_frame_count'], ['many frames', { frames: Array.from({ length: 97 }, (_, i) => ({ time: i / 20, dataUrl: JPEG })) }, 'invalid_frame_count'],
     ['out of order', { frames: [0, 3, 1, 4].map((time) => ({ time, dataUrl: JPEG })) }, 'invalid_timestamps'], ['duplicate times', { frames: [0, 1, 1, 4].map((time) => ({ time, dataUrl: JPEG })) }, 'invalid_timestamps'],
     ['beyond clip', { frames: [0, 1, 4, 7].map((time) => ({ time, dataUrl: JPEG })) }, 'invalid_timestamps'],
     ['remote image', { frames: input().frames.map((frame) => ({ ...frame, dataUrl: 'https://attacker.example/image.jpg' })) }, 'invalid_frame'],
@@ -72,12 +71,28 @@ test('CORS and network failures return an honest combined browser error', async 
     assert.equal(error.code, 'provider_network_or_cors'); assert.match(error.message, /跨域/); assert.ok(!error.message.includes(KEY)); return true;
   });
 });
-test('fenced JSON and raw text fallback are safe data, timestamp hallucinations are dropped', async () => {
-  const observations = [{ time: 3.7, evidence: '可见', certainty: '画面明确' }, { time: 4.201, evidence: '时间舍入', certainty: '99%' }, { time: 5.9, evidence: '未采样', certainty: '画面明确' }];
-  const result = await analyzeFrames(input(), { fetchImpl: async () => upstream('```json\n' + content({ observations }) + '\n```') });
-  assert.equal(result.analysis.observations.length, 2); assert.equal(result.analysis.observations[1].time, 4.2); assert.equal(result.analysis.observations[1].certainty, '可能');
-  const html = '<img src=x onerror=alert(1)>这是普通文本';
-  const raw = await analyzeFrames(input(), { fetchImpl: async () => upstream(html) }); assert.deepEqual(raw.analysis, { rawText: html });
+test('single-point schema accepts fenced JSON, anchors timestamps, and drops unsolicited fields', async () => {
+  const result = await analyzeFrames(input(), { fetchImpl: async () => upstream('```json\n' + content({ nextJump: { ...nextJump, time: 4.201 }, summary: '换机位', limitations: ['补拍'], observations: [{ time: 0 }] }) + '\n```') });
+  assert.deepEqual(result.analysis, { schemaVersion: 2, nextJump: { ...nextJump, time: 4.2 } });
+  for (const time of [5.9, null, '3.7']) {
+    const unanchored = await analyzeFrames(input(), { fetchImpl: async () => upstream(content({ nextJump: { ...nextJump, time } })) });
+    assert.equal(unanchored.analysis.nextJump.time, null);
+  }
+});
+test('malformed, legacy and free-text answers cannot bypass the single-point report', async () => {
+  for (const response of ['<img src=x onerror=alert(1)>这是普通文本', '{}', 'null', JSON.stringify({ summary: '补拍', focus: '换角度' }), content({ nextJump: [nextJump] }), content({ nextJump: { ...nextJump, instruction: ['one', 'two'] } }), content({ nextJump: { ...nextJump, check: ' ' } })]) {
+    await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => upstream(response) }), 'invalid_analysis');
+  }
+});
+test('dense samples through 96 frames are sent without dropping their timestamps', async () => {
+  const frames = Array.from({ length: 96 }, (_, i) => ({ time: Number((i * 0.06).toFixed(3)), dataUrl: JPEG }));
+  const result = await analyzeFrames(input({ frames }), { fetchImpl: async (_url, options) => {
+    const parts = JSON.parse(options.body).messages[1].content;
+    assert.equal(parts.filter(part => part.type === 'image_url').length, 96);
+    assert.match(parts.at(-2).text, /5\.700/);
+    return upstream();
+  } });
+  assert.equal(result.frameCount, 96);
 });
 test('empty, invalid JSON, declared-size, and streamed-size failures are mapped', async () => {
   await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => upstream('') }), 'empty_analysis');
