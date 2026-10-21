@@ -29,6 +29,7 @@ function setView(view) {
  if(view==='review') renderHistory();
 }
 function updateModelHint() {
+ ui.modelValidation.hidden=true;
  const custom=ui.modelSelect.value==='__custom';ui.customModelField.hidden=!custom;
  const selected=custom?getModel(ui.customModelInput.value.trim(),{allowCustom:true}):getModel(ui.modelSelect.value);
  ui.modelHint.textContent=custom?'填写百炼控制台中的完整视频理解模型 ID，使用当前北京地域 Key；新增型号的兼容性需实际验证。':(selected?.thinking?'此模型始终开启思考，可能需要更长时间。':'按模型支持的方式调用；优先使用非思考模式。')+' 当前发送视频画面，不发送音频。';
@@ -45,6 +46,7 @@ function populateModels() {
 function showSettings() {ui.apiKeyInput.value=apiKey;ui.autoAnalyzeInput.checked=autoAnalyze;ui.modelSelect.value=VIDEO_MODELS.some(entry=>entry.id===model)?model:'__custom';ui.customModelInput.value=ui.modelSelect.value==='__custom'?model:'';updateModelHint();ui.settingsDialog.showModal();}
 populateModels();
 ui.modelSelect.onchange=updateModelHint;
+ui.customModelInput.oninput=()=>{ui.modelValidation.hidden=true;};
 function persistGoal() {
  try {localStorage.setItem('airbag-goal-v1',JSON.stringify({action,actionDetail,focus}));}catch{}
 }
@@ -357,7 +359,7 @@ ui.settingsForm.onsubmit=e=>{
  if(value&&(/[\s\r\n]/.test(value)||value.length<16)){toast('请填写完整的百炼 API Key。');return;}
  if(ui.autoAnalyzeInput.checked&&!value){toast('开启自动分析前，请先填写 API Key。');return;}
  const selectedModel=ui.modelSelect.value==='__custom'?ui.customModelInput.value.trim():ui.modelSelect.value;
- if(!getModel(selectedModel,{allowCustom:true})){toast('请选择视频理解模型，或填写正确的百炼视频模型 ID。');return;}
+ if(!getModel(selectedModel,{allowCustom:true})){ui.modelValidation.textContent='此型号已下线、不支持视频，或 ID 格式不正确。请选择列表中的视频理解模型。';ui.modelValidation.hidden=false;return;}
  apiKey=value;autoAnalyze=ui.autoAnalyzeInput.checked;model=selectedModel;ui.apiKeyInput.value='';ui.settingsDialog.close();
  ui.analysisPrivacy.textContent=apiKey?'已连接百炼模型 · 密钥仅本次打开有效'+(autoAnalyze?' · 已允许每跳自动分析':''):'仅将抽取画面发送到百炼模型；需要填写自己的 API Key。';
  toast(apiKey?'本次设置已保存。':'本地回放模式，无需百炼模型 Key。');
