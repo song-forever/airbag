@@ -10,7 +10,7 @@ export function getFrameTimes(duration) {
   const start = 0.01;
   // Quantize the upper bound down so rounding never seeks beyond the permitted
   // endpoint when an imported clip has a duration with sub-millisecond digits.
-  const upperBound = duration - 0.04;
+  const upperBound = duration - 0.12;
   let endTicks = Math.round(upperBound * 1000);
   if (endTicks / 1000 > upperBound) endTicks--;
   const end = endTicks / 1000;

@@ -11,21 +11,21 @@ test('a 6.2 second jump receives 75 frames spanning the clip', () => {
   const times = getFrameTimes(6.2);
   assert.equal(times.length, 75);
   assert.equal(times[0], 0.01);
-  assert.equal(times.at(-1), 6.16);
+  assert.equal(times.at(-1), 6.08);
 });
 
 test('a 60 second selection is capped at 96 frames', () => {
   const times = getFrameTimes(60);
   assert.equal(times.length, 96);
   assert.equal(times[0], 0.01);
-  assert.equal(times.at(-1), 59.96);
+  assert.equal(times.at(-1), 59.88);
 });
 
 test('the minimum 0.5 second selection still has eight frames', () => {
   const times = getFrameTimes(0.5);
   assert.equal(times.length, 8);
   assert.equal(times[0], 0.01);
-  assert.equal(times.at(-1), 0.46);
+  assert.equal(times.at(-1), 0.38);
 });
 
 test('rejects durations outside the accepted numeric range', () => {
@@ -41,7 +41,7 @@ test('timestamps are rounded, strictly increasing and inside both endpoints', ()
     assert.equal(times[0], 0.01);
     for (let i = 0; i < times.length; i++) {
       assert.equal(times[i], Number(times[i].toFixed(3)));
-      assert.ok(times[i] >= 0.01 && times[i] <= duration - 0.04, `timestamp bounds for ${duration}`);
+      assert.ok(times[i] >= 0.01 && times[i] <= duration - 0.12, `timestamp bounds for ${duration}`);
       if (i) assert.ok(times[i] > times[i - 1], `strict order for ${duration}`);
       const uniform = times[0] + (times.at(-1) - times[0]) * i / (times.length - 1);
       assert.ok(Math.abs(times[i] - uniform) <= 0.0005000001, `uniform spacing after rounding for ${duration}`);

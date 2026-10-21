@@ -1,18 +1,21 @@
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.5.3';
-import { getFrameTimes } from './frame-sampling.js';
+import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
+import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
 let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
 let action = '直飞', actionDetail = '', focus = '';
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
+let detectionActive=false;
 let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
 let analysisController = null, analysisBusy = false, analysisRun = 0;
-const MIN_RECORDING_MS=10000;
-let tracker = new JumpTracker({maxDurationMs:18000, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
+const MIN_RECORDING_MS=10000,MAX_RECORDING_MS=45000,END_TAIL_MS=3000;
+let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
+let tracker = new JumpTracker({maxDurationMs:MAX_RECORDING_MS, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
 const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
 const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
 let previousMotionFrame=null,motionSince=null,lastMotionAt=null;
@@ -127,7 +130,7 @@ async function openCamera() {
 }
 function closeCamera() {
  if(armed)return;
- clearTimeout(inferenceTimer);
+ detectionActive=false;clearTimeout(inferenceTimer);
  if(stream){stream.getTracks().forEach(track=>{track.onended=null;track.stop();});stream=null;}
  ui.cameraVideo.srcObject=null;ui.cameraVideo.hidden=true;ui.cameraPlaceholder.hidden=false;ui.cameraStage.classList.remove('live');
  ui.cameraBadge.innerHTML='<i></i> CAMERA OFF';ui.cameraBadge.classList.remove('recording');ui.closeCameraBtn.hidden=true;
@@ -184,7 +187,7 @@ function startMotionRecording(detections) {
  capture.onstop=()=>{if(finalized||recorder!==capture)return;finalized=true;return finalizeRecording();};
  recorder=capture;chunks=captureChunks;recordingStart=performance.now();
  try{capture.start(1000);}catch(error){recorder=null;chunks=[];throw error;}
- departureAt=recordingStart;tracker.startFromMotion(detections,departureAt);
+ departureAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
  ui.stopBtn.textContent='■ 结束并保存';
  ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');
  ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';status('已检测到画面运动，开始录像');
@@ -197,33 +200,37 @@ async function armCapture() {
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
   recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
-  armed=true;tracker.reset();previousMotionFrame=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
+  armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();previousMotionFrame=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
   // Person detection helps follow the attempt, but must not block motion start.
   loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
   ui.stopBtn.textContent='停止侦测';ui.recordClock.textContent='侦测中';
   ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraHint.textContent='正在侦测 · 尚未录像';status('正在侦测画面变化，检测到出发后才开始录像');
   armTimer=setInterval(()=>{
    const now=performance.now();ui.recordClock.textContent=departureAt!==null?formatTime((now-recordingStart)/1000):'侦测中';
-   if(departureAt===null&&now-armedAt>60000)finishCapture('waiting_timeout');
-   if(departureAt&&now-departureAt>=18000)finishCapture('max_duration');
+   if(departureAt!==null&&now-recordingStart>=MAX_RECORDING_MS)queueAutoFinish('max_duration',now);
+   if(autoFinishAt!==null&&now>=autoFinishAt)finishCapture(autoFinishReason);
   },200);
   detectLoop();
  }catch(err){status(err.message,true);toast(err.message);}
  finally{processing=false;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(armed);}
 }
+function queueAutoFinish(reason,now){
+ if(autoFinishAt!==null)return;autoFinishReason=reason;autoFinishAt=Math.max(recordingStart+MIN_RECORDING_MS,now+END_TAIL_MS);
+ ui.cameraHint.textContent='正在保留结束后的气垫画面';
+}
 function detectLoop() {
- if(!armed||!stream)return;
+ if(!detectionActive||!stream)return;
  const started=performance.now();
  try{
   const video=ui.cameraVideo;
   if(video.readyState>=2&&video.videoWidth){
    const now=performance.now(),changed=detectFrameChange(video);if(changed)lastMotionAt=now;
    let detections=[];
-   if(detector){try{
+   if(detector&&!analysisBusy&&!finishing){try{
     const result=detector.detectForVideo(video,now);
     detections=(result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
    }catch{/* Motion detection continues if person inference fails. */}}
-   if(departureAt===null){
+   if(armed&&departureAt===null){
     if(changed){
      if(motionSince===null)motionSince=now;
      if(now-motionSince>=120){
@@ -231,71 +238,59 @@ function detectLoop() {
      }
     }else motionSince=null;
    }
-   const info=departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
+   if(armed&&departureAt!==null&&firstPersonAt===null&&detections.length)firstPersonAt=now;
+   const info=armed&&departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
    drawTarget(info.target);
-   if(info.state==='complete'&&now-recordingStart>=MIN_RECORDING_MS){finishCapture(info.reason);return;}
-   if(departureAt!==null&&!detections.length&&now-recordingStart>=MIN_RECORDING_MS&&lastMotionAt!==null&&now-lastMotionAt>=2200){finishCapture('motion_finished');return;}
+   if(armed&&info.state==='complete'&&now-recordingStart>=MIN_RECORDING_MS)queueAutoFinish(info.reason,now);
+   if(armed&&departureAt!==null&&!detections.length&&now-recordingStart>=MIN_RECORDING_MS&&lastMotionAt!==null&&now-lastMotionAt>=2200)queueAutoFinish('motion_finished',now);
   }
  }catch{status('跟踪暂时中断，录像继续；可手动结束',true);}
  inferenceTimer=setTimeout(detectLoop,Math.max(40,180-(performance.now()-started)));
 }
 function finishCapture(reason='manual',discard=false) {
  if(!armed||finishing)return;
- finishing=true;armed=false;pendingReason=reason;discardCapture=discard;
- clearInterval(armTimer);clearTimeout(inferenceTimer);setCaptureControls(false);
+ const waiting=recorder===null;
+ if(reason==='interrupted'||reason==='track_ended'||(reason==='manual'&&waiting))detectionActive=false;
+ finishing=true;armed=false;pendingReason=reason;discardCapture=discard;autoFinishAt=null;
+ clearInterval(armTimer);clearTimeout(inferenceTimer);if(detectionActive)inferenceTimer=setTimeout(detectLoop,180);setCaptureControls(false);
  ui.armBtn.disabled=true;ui.armLabel.textContent='正在保存…';
  status(discard?'正在取消本次…':'正在保存这一跳…');
  if(recorder){if(recorder.state!=='inactive')recorder.stop();}else finalizeRecording();
 }
 async function getVideoMetadata(blob) {
- const video=document.createElement('video');video.muted=true;video.playsInline=true;video.preload='metadata';
- const url=URL.createObjectURL(blob);video.src=url;
- try {
-  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('视频元数据读取超时')),10000);video.onloadedmetadata=()=>{clearTimeout(timer);resolve();};video.onerror=()=>{clearTimeout(timer);reject(new Error('视频格式暂不兼容，请导出为 H.264 编码的 MP4 后重试。'));};});
-  let duration=video.duration;
-  if(!Number.isFinite(duration)||duration===Infinity){
-   video.currentTime=1e10;await sleep(250);duration=video.duration;video.currentTime=0;
-  }
-  return {duration,width:video.videoWidth,height:video.videoHeight};
- }finally{video.removeAttribute('src');video.load();URL.revokeObjectURL(url);}
-}
-async function seekVideo(video,time,signal) {
- if(signal?.aborted)throw new DOMException('Aborted','AbortError');
- if(Math.abs(video.currentTime-time)<.015&&video.readyState>=2)return;
- await new Promise((resolve,reject)=>{
-  const timer=setTimeout(()=>done(new Error('视频画面读取超时，请重试或缩短片段。')),7000);
-  const done=error=>{clearTimeout(timer);video.removeEventListener('seeked',onSeek);video.removeEventListener('error',onError);signal?.removeEventListener('abort',onAbort);error?reject(error):resolve();};
-  const onSeek=()=>done(),onError=()=>done(new Error('无法解码这段视频，请尝试导出 MP4。')),onAbort=()=>done(new DOMException('Aborted','AbortError'));
-  video.addEventListener('seeked',onSeek,{once:true});video.addEventListener('error',onError,{once:true});signal?.addEventListener('abort',onAbort,{once:true});
-  try{video.currentTime=time;}catch(err){done(err);}
- });
-}
-async function getPoster(blob,time=0) {
- const url=URL.createObjectURL(blob),v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='auto';v.src=url;
+ const reader=await openVideoReader(blob,{readyState:1});
  try{
-  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('poster timeout')),5000);v.onloadeddata=()=>{clearTimeout(timer);resolve();};v.onerror=()=>{clearTimeout(timer);reject();};});
-  await seekVideo(v,Math.max(.01,time));
-  const c=document.createElement('canvas');const scale=Math.min(1,240/Math.max(v.videoWidth,v.videoHeight));c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));c.getContext('2d').drawImage(v,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.65);
- }catch{return '';}finally{v.removeAttribute('src');v.load();URL.revokeObjectURL(url);}
+  const video=reader.video;let duration=video.duration;
+  if(!Number.isFinite(duration)){try{video.currentTime=1e10;await sleep(250);duration=video.duration;}catch{} }
+  if(!Number.isFinite(duration)&&video.seekable.length)duration=video.seekable.end(video.seekable.length-1);
+  return {duration,width:video.videoWidth,height:video.videoHeight};
+ }finally{reader.dispose();}
+}
+async function seekVideo(video,time,signal){return seekVideoFrame(video,time,{signal});}
+async function getPoster(blob,time=0) {
+ let reader;
+ try{reader=await openVideoReader(blob);const v=reader.video;await seekVideo(v,Math.max(.01,time));
+ const c=document.createElement('canvas'),scale=Math.min(1,240/Math.max(v.videoWidth,v.videoHeight));c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));c.getContext('2d').drawImage(v,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.65);
+ }catch{return '';}finally{reader?.dispose();}
 }
 async function finalizeRecording() {
  const didRecord=!!recorder;
  const mime=recorder?.mimeType||'video/mp4',blob=new Blob(chunks,{type:mime});chunks=[];
  const elapsed=didRecord?(performance.now()-recordingStart)/1000:0;
- const departedOffset=departureAt?Math.max(0,(departureAt-recordingStart)/1000-1.2):0;
+ const departedOffset=firstPersonAt===null?0:Math.max(0,(firstPersonAt-recordingStart)/1000-.25);
  const detectedAction=goalText();const shouldAnalyze=autoAnalyze&&!!apiKey&&!!departureAt&&pendingReason!=='interrupted';
- closeCamera();
+ if(!detectionActive)closeCamera();
  if(!document.hidden)keepAwake();
  try{
   if(!didRecord){status(pendingReason==='waiting_timeout'?reasons.waiting_timeout:'已停止侦测，未生成录像');return;}
   if(discardCapture||blob.size<100){status('已取消，准备好后可以重新拍摄');return;}
   let meta;try{meta=await getVideoMetadata(blob);}catch{meta={duration:elapsed,width:0,height:0};}
   if(!Number.isFinite(meta.duration)||meta.duration<=0)meta.duration=elapsed;
-  const clip={id:crypto.randomUUID(),createdAt:Date.now(),source:'camera',name:'现场拍摄',blob,duration:meta.duration,width:meta.width,height:meta.height,action:detectedAction,actionType:action,actionDetail,focus,trimStart:Math.min(departedOffset,meta.duration-.1),trimEnd:meta.duration,reason:pendingReason,note:reasons[pendingReason]||'自动检测结束',poster:'',analysis:null};
+  const clip={id:crypto.randomUUID(),createdAt:Date.now(),source:'camera',name:'现场拍摄',blob,duration:meta.duration,width:meta.width,height:meta.height,action:detectedAction,actionType:action,actionDetail,focus,contentStart:departedOffset,contentStartConfirmed:firstPersonAt!==null,trimStart:Math.max(0,Math.min(departedOffset,meta.duration-.5)),trimEnd:meta.duration,reason:pendingReason,note:reasons[pendingReason]||'自动检测结束',poster:'',analysis:null};
   clip.poster=await getPoster(blob,clip.trimStart+.1);records.unshift(clip);await persistRecord(clip);await selectRecord(clip,{internal:true});setView('review');window.scrollTo({top:0,behavior:'smooth'});
   if(shouldAnalyze)setTimeout(()=>{if(current===clip)analyzeCurrent();},0);else if(autoAnalyze&&!apiKey)toast('录像已保存。请在设置中填写百炼模型 Key 后分析。');
  }catch(err){toast('录像处理失败：'+err.message);}
- finally{finishing=false;recorder=null;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(false);}
+ finally{finishing=false;recorder=null;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(false);if(detectionActive){ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraBadge.classList.remove('recording');ui.cameraHint.textContent='侦测继续开启 · 点击准备下一跳可录像';ui.recordClock.textContent='侦测中';status('本跳已结束，侦测继续开启；点击准备下一跳可再次录像');}}
 }
 async function importVideo(file) {
  if(!file)return;
@@ -371,13 +366,47 @@ function renderAnalysis() {
  if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+frame.time;ui.reviewVideo.pause();};strip.append(btn);}result.append(strip);}
  const u=data.usage||{};appendText(result,'div',data.model+(data.frameCount?' · '+data.frameCount+' 张画面':'')+'\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
 }
+async function findContentStart(video,start,end,signal) {
+ let model=detector;
+ if(!model){
+  let timer,onAbort;
+  try{
+   if(signal.aborted)throw new DOMException('Aborted','AbortError');
+   model=await Promise.race([loadDetector(),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),8000);}),new Promise((_,reject)=>{onAbort=()=>reject(new DOMException('Aborted','AbortError'));signal.addEventListener('abort',onAbort,{once:true});})]);
+  }catch(error){if(error.name==='AbortError')throw error;return null;}
+  finally{clearTimeout(timer);if(onAbort)signal.removeEventListener('abort',onAbort);}
+  if(!model)return null;
+ }
+ const hasPerson=async time=>{
+  if(signal.aborted)throw new DOMException('Aborted','AbortError');
+  await seekVideo(video,time,signal);
+  try{return (model.detectForVideo(video,performance.now()).detections||[]).some(item=>(item.categories?.[0]?.score||0)>=.38);}catch{return null;}
+ };
+ for(let time=start;time<end-.15;time+=1){
+  ui.progressDetail.textContent='正在定位有效动作起点 '+(time-start).toFixed(1)+' 秒';
+  const found=await hasPerson(time);
+  if(found===null)return null;
+  if(found){
+   let first=time;
+   for(let t=Math.max(start,time-1);t<time;t+=.25){if(await hasPerson(t)){first=t;break;}}
+   return Math.max(start,first-.25);
+  }
+ }
+ return start;
+}
 async function extractFrames(record,signal) {
- const start=record.trimStart,end=record.trimEnd,duration=end-start;
+ let start=record.trimStart;const end=record.trimEnd;let duration=end-start;
  if(duration<0.5||duration>60)throw new Error('请选择 0.5 至 60 秒的片段。');
- const v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='auto';v.style.cssText='position:fixed;width:1px;height:1px;opacity:.001;left:0;bottom:0;pointer-events:none';document.body.append(v);
- const url=URL.createObjectURL(record.blob);v.src=url;let frames=[];
+ const reader=await openVideoReader(record.blob,{signal}),v=reader.video;let frames=[];
  try {
-  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('视频加载超时')),10000);const onAbort=()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));};signal.addEventListener('abort',onAbort,{once:true});v.onloadeddata=()=>{clearTimeout(timer);signal.removeEventListener('abort',onAbort);resolve();};v.onerror=()=>{clearTimeout(timer);signal.removeEventListener('abort',onAbort);reject(new Error('无法读取视频画面，请使用兼容的 MP4 视频。'));};});
+  if(!record.contentStartConfirmed){
+   const contentStart=await findContentStart(v,start,end,signal);
+   if(typeof contentStart==='number'&&contentStart>start+.05&&end-contentStart>=.5){
+    start=contentStart;duration=end-start;record.trimStart=start;record.contentStart=start;record.analysis=null;record.keyframes=[];
+    ui.trimStart.value=start.toFixed(1);ui.trimLabel.textContent=start.toFixed(1)+'–'+end.toFixed(1)+' 秒';
+   }
+   record.contentStartConfirmed=typeof contentStart==='number';await persistRecord(record);
+  }
   const times=getFrameTimes(duration),count=times.length,c=document.createElement('canvas'),scale=Math.min(1,960/Math.max(v.videoWidth,v.videoHeight));
   c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));const ctx=c.getContext('2d',{alpha:false});
   // Leave room for JSON, prompts and timestamps below the endpoint's 16 MiB limit.
@@ -396,7 +425,7 @@ async function extractFrames(record,signal) {
    ui.analysisMeter.value=Math.round((i+1)/count*55);ui.progressDetail.textContent='正在抽取画面 '+(i+1)+' / '+count+'，原片不上传。';await sleep(0);
   }
   return frames;
- }finally{v.removeAttribute('src');v.load();v.remove();URL.revokeObjectURL(url);}
+ }finally{reader.dispose();}
 }
 async function analyzeCurrent() {
  if(!current||analysisBusy||armed||processing||finishing){if(armed||processing||finishing)toast('请先结束拍摄并等待保存完成。');return;}
@@ -410,7 +439,7 @@ async function analyzeCurrent() {
   ui.progressTitle.textContent='百炼模型正在看这一跳';ui.progressDetail.textContent='正在分析助滑、起跳与腾空。可先在左侧慢放回看。';ui.analysisMeter.value=65;
   const data=await analyzeFrames({apiKey,model,frames,action:record.action,duration:record.trimEnd-record.trimStart},{signal:analysisController.signal});
   if(run!==analysisRun)return;
-  record.analysis=data;record.keyframes=frames.filter((_,i)=>i%Math.max(1,Math.floor(frames.length/6))===0).slice(0,6);await persistRecord(record);
+  record.analysis=data;record.keyframes=Array.from({length:Math.min(8,frames.length)},(_,i)=>frames[Math.round(i*(frames.length-1)/(Math.min(8,frames.length)-1))]);await persistRecord(record);
   ui.analysisMeter.value=100;renderAnalysis();renderHistory();toast('这一跳的分析已完成。');
  }catch(err){
   if(run===analysisRun){ui.analysisError.hidden=false;ui.analysisError.textContent=err.name==='AbortError'?'分析已取消或请求超时，视频仍保存在本机。':err.message;ui.analysisIdle.hidden=!!record.analysis;if(record.analysis)renderAnalysis();}
@@ -467,8 +496,8 @@ ui.deleteClipBtn.onclick=async()=>{
  if(records.length)await selectRecord(records[0]);else{ui.reviewContent.hidden=true;ui.reviewEmpty.hidden=false;ui.reviewCount.textContent='0';}
  renderHistory();
 };
-document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAwake();if(armed)finishCapture('interrupted');}else if(keepScreenAwake)keepAwake();});
-window.addEventListener('pagehide',()=>{apiKey='';releaseAwake();if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');else closeCamera();}else if(keepScreenAwake)keepAwake();});
+window.addEventListener('pagehide',()=>{apiKey='';releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
 window.addEventListener('pageshow',()=>{if(keepScreenAwake&&!document.hidden)keepAwake();});
 window.addEventListener('beforeunload',event=>{if(armed||analysisBusy){event.preventDefault();event.returnValue='';}});
 window.addEventListener('unhandledrejection',event=>{console.warn('An operation could not complete.');});
