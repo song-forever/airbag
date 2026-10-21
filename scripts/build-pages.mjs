@@ -6,7 +6,7 @@ const root = new URL('../', import.meta.url);
 const dist = new URL('dist/', root);
 await rm(dist, { recursive: true, force: true });
 await mkdir(new URL('vision/wasm/', dist), { recursive: true });
-for (const file of ['index.html', 'style.css', 'app.js', 'tracker.js', 'analysis-client.js', 'video-reader.js', 'video-export.js', 'frame-sampling.js', 'model-catalog.js', 'icon.svg', 'manifest.webmanifest']) {
+for (const file of ['index.html', 'style.css', 'app.js', 'tracker.js', 'motion-detector.js', 'analysis-client.js', 'video-reader.js', 'video-export.js', 'frame-sampling.js', 'model-catalog.js', 'icon.svg', 'manifest.webmanifest']) {
   await copyFile(new URL('src/' + file, root), new URL(file, dist));
 }
 await mkdir(new URL('licenses/', dist), { recursive: true });

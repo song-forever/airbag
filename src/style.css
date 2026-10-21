@@ -7,3 +7,5 @@
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 .video-save-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.video-save-actions>.button{flex:1;min-width:150px}.video-save-actions+.micro-note{margin-bottom:15px!important}
+
+.capture-controls{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}.capture-controls>.button{flex:1;min-width:130px}.capture-controls>.record-actions{width:100%;margin-top:0}

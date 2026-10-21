@@ -1,3 +1,4 @@
+import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.5.3';
@@ -19,7 +20,8 @@ let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
 let tracker = new JumpTracker({maxDurationMs:MAX_RECORDING_MS, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
 const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
 const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
-let previousMotionFrame=null,motionSince=null,lastMotionAt=null;
+const motionDetector=new FrameMotionDetector({width:160,height:90,threshold:.05});
+let motionState=null,motionSince=null,lastMotionAt=null;
 const formatTime = (t) => Number.isFinite(t) ? Math.floor(t/60).toString().padStart(2,'0') + ':' + Math.floor(t%60).toString().padStart(2,'0') : '00:00';
 const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 const reasons = {
@@ -89,8 +91,9 @@ async function initializeHistory() {
  ui.reviewCount.textContent=String(records.length);renderHistory();
 }
 function setCaptureControls(busy) {
- ui.armBtn.hidden=busy;ui.recordActions.hidden=!busy;ui.importBtn.disabled=busy||processing||finishing;
+ ui.armBtn.hidden=false;ui.armBtn.disabled=busy||processing||finishing;ui.recordActions.hidden=!busy||!recorder;ui.importBtn.disabled=busy||processing||finishing;
  ui.reviewTab.disabled=busy||processing||finishing;
+ ui.stopDetectionBtn.disabled=!stream&&!detectionActive;
  ui.openCameraBtn.disabled=processing;ui.closeCameraBtn.hidden=!stream||busy;
  document.querySelectorAll('[data-action],#actionDetail,#focusInput').forEach(el=>el.disabled=busy);
 }
@@ -125,7 +128,7 @@ async function openCamera() {
   const settings=stream.getVideoTracks()[0].getSettings();
   ui.cameraQuality.textContent=(settings.width||'')+' × '+(settings.height||'')+' · '+Math.round(settings.frameRate||30)+' fps';
   ui.cameraBadge.innerHTML='<i></i> CAMERA READY';
-  ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;
+  ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;ui.stopDetectionBtn.disabled=false;
   stream.getVideoTracks()[0].onended=()=>{if(armed)finishCapture('track_ended');else closeCamera();};
  }catch(err){closeCamera();if(err.name==='NotAllowedError')throw new Error('摄像头权限未开启。请在 Safari 网站设置中允许相机，再重试。');if(err.name==='NotReadableError')throw new Error('摄像头暂时不可用，请关闭其他正在使用相机的应用。');throw err;}
 }
@@ -136,7 +139,7 @@ function closeCamera() {
  ui.cameraVideo.srcObject=null;ui.cameraVideo.hidden=true;ui.cameraPlaceholder.hidden=false;ui.cameraStage.classList.remove('live');
  ui.cameraBadge.innerHTML='<i></i> CAMERA OFF';ui.cameraBadge.classList.remove('recording');ui.closeCameraBtn.hidden=true;
  const ctx=ui.trackingCanvas.getContext('2d');ctx.clearRect(0,0,ui.trackingCanvas.width,ui.trackingCanvas.height);
- status('摄像头已关闭');ui.cameraHint.textContent='准备好后，点击下方按钮';ui.recordClock.textContent='00:00';
+ ui.stopDetectionBtn.disabled=true;status('摄像头已关闭');ui.cameraHint.textContent='准备好后，点击下方按钮';ui.recordClock.textContent='00:00';
 }
 async function loadDetector() {
  if(detector)return detector;
@@ -166,18 +169,9 @@ function drawTarget(rect) {
 function detectFrameChange(video) {
  motionContext.drawImage(video,0,0,motionCanvas.width,motionCanvas.height);
  const pixels=motionContext.getImageData(0,0,motionCanvas.width,motionCanvas.height).data;
- const gray=new Uint8Array(pixels.length/4);let drift=0;
- for(let i=0,j=0;i<pixels.length;i+=4,j++){
-  gray[j]=(pixels[i]*77+pixels[i+1]*150+pixels[i+2]*29)>>8;
-  if(previousMotionFrame)drift+=gray[j]-previousMotionFrame[j];
- }
- if(!previousMotionFrame){previousMotionFrame=gray;return false;}
- // Remove a uniform brightness shift so automatic exposure alone is less
- // likely to count as a departure. No person-size or stationary lock is needed.
- drift/=gray.length;let changed=0;
- for(let i=0;i<gray.length;i++)if(Math.abs(gray[i]-previousMotionFrame[i]-drift)>18)changed++;
- previousMotionFrame=gray;
- return changed>=Math.max(18,gray.length*.05);
+ const gray=new Uint8Array(pixels.length/4);
+ for(let i=0,j=0;i<pixels.length;i+=4,j++)gray[j]=(pixels[i]*77+pixels[i+1]*150+pixels[i+2]*29)>>8;
+ motionState=motionDetector.update(gray,performance.now());return motionState.moving;
 }
 function startMotionRecording(detections) {
  const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
@@ -189,7 +183,7 @@ function startMotionRecording(detections) {
  recorder=capture;chunks=captureChunks;recordingStart=performance.now();
  try{capture.start(1000);}catch(error){recorder=null;chunks=[];throw error;}
  departureAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
- ui.stopBtn.textContent='■ 结束并保存';
+ setCaptureControls(true);ui.stopBtn.textContent='■ 结束并保存';
  ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');
  ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';status('已检测到画面运动，开始录像');
 }
@@ -201,7 +195,7 @@ async function armCapture() {
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
   recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
-  armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();previousMotionFrame=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
+  armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();motionDetector.reset();motionState=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
   // Person detection helps follow the attempt, but must not block motion start.
   loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
   ui.stopBtn.textContent='停止侦测';ui.recordClock.textContent='侦测中';
@@ -213,7 +207,7 @@ async function armCapture() {
   },200);
   detectLoop();
  }catch(err){status(err.message,true);toast(err.message);}
- finally{processing=false;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(armed);}
+ finally{processing=false;ui.armBtn.disabled=false;ui.armLabel.textContent='开始探测';setCaptureControls(armed);}
 }
 function queueAutoFinish(reason,now){
  if(autoFinishAt!==null)return;autoFinishReason=reason;autoFinishAt=Math.max(recordingStart+MIN_RECORDING_MS,now+END_TAIL_MS);
@@ -232,9 +226,10 @@ function detectLoop() {
     detections=(result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
    }catch{/* Motion detection continues if person inference fails. */}}
    if(armed&&departureAt===null){
+    ui.cameraHint.textContent=motionState?.cameraMoving?'相机晃动，等待画面稳定':motionState?.ready?'正在侦测 · 尚未录像':'等待画面稳定 · 尚未录像';
     if(changed){
      if(motionSince===null)motionSince=now;
-     if(now-motionSince>=120){
+     if(now-motionSince>=350){
       try{startMotionRecording(detections);}catch(error){finishCapture('track_ended',true);toast('未能开始录像：'+error.message);return;}
      }
     }else motionSince=null;
@@ -451,16 +446,13 @@ async function analyzeCurrent() {
 function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;a.rel='noopener';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),300000);}
 function updateVideoSaveControls(){
  let available=false;try{available=!!current&&canShareVideo(makeVideoFile(current));}catch{}
- ui.shareVideoBtn.hidden=!available;
- ui.videoSaveHint.textContent=available?'可通过保存菜单选择“存储视频”或“存储到文件”。':'下载后可在浏览器的下载列表中查看视频。';
-}
-function downloadCurrentVideo(){
- if(!current)return;
- try{const file=makeVideoFile(current);download(file,file.name);toast('已请求下载原视频，请在浏览器下载列表中查看。');}catch(error){toast(error.message);}
+ ui.shareVideoBtn.disabled=!available;
+ ui.videoSaveHint.textContent=available?'在系统菜单中点击“存储视频”，即可保存到 iPhone 相册。':'请用支持系统视频保存的 iPhone Safari 打开。';
 }
 ui.openCameraBtn.onclick=()=>openCamera().catch(err=>{toast(err.message);status(err.message,true);});
 ui.closeCameraBtn.onclick=closeCamera;ui.armBtn.onclick=armCapture;ui.stopBtn.onclick=()=>finishCapture('manual');
 ui.cancelBtn.onclick=()=>finishCapture('manual',true);
+ui.stopDetectionBtn.onclick=()=>{detectionActive=false;if(armed){finishCapture('manual');}else{clearTimeout(inferenceTimer);closeCamera();status('探测已结束');}};
 ui.importBtn.onclick=ui.emptyImportBtn.onclick=()=>ui.fileInput.click();
 ui.fileInput.onchange=()=>importVideo(ui.fileInput.files[0]);
 ui.captureTab.onclick=()=>setView('capture');ui.reviewTab.onclick=()=>setView('review');
@@ -497,16 +489,15 @@ ui.reviewAction.onchange=ui.reviewActionDetail.onchange=async()=>{
  current.actionType=ui.reviewAction.value;current.actionDetail=ui.reviewActionDetail.value.trim();current.action=current.actionType+(current.actionDetail?' · '+current.actionDetail:'');
  current.analysis=null;current.keyframes=[];await persistRecord(current);ui.clipTitle.textContent=current.actionType;renderAnalysis();renderHistory();
 };
-ui.downloadVideoBtn.onclick=downloadCurrentVideo;
 ui.shareVideoBtn.onclick=async()=>{
  if(!current)return;
  try{
   const file=makeVideoFile(current);
-  if(!canShareVideo(file)){downloadCurrentVideo();return;}
+  if(!canShareVideo(file)){toast('请在 iPhone Safari 中打开，再选择存储视频。');return;}
   await navigator.share({files:[file],title:'跃练视频'});
  }catch(error){
   if(error.name==='AbortError')toast('已取消保存，视频仍保留在浏览器。');
-  else downloadCurrentVideo();
+  else toast('未能打开系统保存菜单，请重试；视频仍保留在浏览器。');
  }
 };
 ui.exportReportBtn.onclick=()=>{if(!current?.analysis)return;download(new Blob([JSON.stringify({createdAt:new Date(current.createdAt).toISOString(),action:current.action,range:{start:current.trimStart,end:current.trimEnd},...current.analysis},null,2)],{type:'application/json'}),'跃练-动作分析.json');};
