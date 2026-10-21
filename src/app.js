@@ -1,7 +1,7 @@
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js';
 import { getFrameTimes } from './frame-sampling.js';
-import { JumpTracker } from './tracker.js';
+import { JumpTracker } from './tracker.js?v=6764207';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
 let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
