@@ -54,7 +54,7 @@ function validatePayload(payload) {
   if (typeof apiKey !== 'string' || !/^[A-Za-z0-9._-]{16,256}$/.test(apiKey)) {
     throw problem('invalid_api_key', '请在设置中填写有效的阿里云百炼北京地域 API Key。');
   }
-  if (!getModel(model, { allowCustom: true })) throw problem('unsupported_model', '此型号不能用于视频分析，请选择百炼视频理解模型。');
+  if (!getModel(model)) throw problem('unsupported_model', '此型号不在当前筛选的视频模型列表中，请重新选择。');
   if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0 || duration > 60) {
     throw problem('invalid_duration', '请选择不超过 60 秒的视频片段。');
   }
@@ -86,11 +86,11 @@ function makeProviderPayload(payload) {
     content.push({ type: 'text', text: `片段时间 ${frame.time.toFixed(3)} 秒：` });
     content.push({ type: 'image_url', image_url: { url: frame.dataUrl } });
   }
-  const config = getModel(payload.model, { allowCustom: true });
+  const config = getModel(payload.model);
   const request = {
     model: payload.model,
     messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content }],
-    max_tokens: config.thinking || config.custom ? 8192 : 1400,
+    max_tokens: config.thinking ? 8192 : 1400,
     stream: !!config.stream,
   };
   if (typeof config.thinking === 'boolean' && !config.thinking) request.enable_thinking = false;

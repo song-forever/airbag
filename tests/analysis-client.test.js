@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeFrames, estimateCostCny, QWEN_ENDPOINT, MAX_BODY_BYTES, MAX_FRAME_BYTES } from '../src/analysis-client.js';
+import { analyzeFrames, estimateCostCny, QWEN_ENDPOINT, DEFAULT_MODEL, MAX_BODY_BYTES, MAX_FRAME_BYTES } from '../src/analysis-client.js';
 
 const KEY = 'sk-test-only-not-a-real-key-12345';
 const JPEG = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224, 1, 2, 255, 217]).toString('base64');
@@ -33,7 +33,7 @@ test('browser sends only to official endpoint, no cookies or key in JSON, bounde
 });
 test('supports default model and a 240-character goal', async () => {
   const payload = input({ action: 'x'.repeat(240) }); delete payload.model;
-  const result = await analyzeFrames(payload, { fetchImpl: async () => upstream() }); assert.equal(result.model, 'qwen3-vl-plus');
+  const result = await analyzeFrames(payload, { fetchImpl: async () => upstream() }); assert.equal(result.model, DEFAULT_MODEL);
 });
 test('invalid input is rejected before network access', async (t) => {
   const cases = [
@@ -87,8 +87,8 @@ test('empty, invalid JSON, declared-size, and streamed-size failures are mapped'
 });
 test('missing usage is unknown, not free, and price tiers are applied to all tokens', async () => {
   const result = await analyzeFrames(input(), { fetchImpl: async () => upstream(content(), {}) }); assert.equal(result.estimatedCostCny, null); assert.equal(result.usage.prompt_tokens, null);
-  assert.equal(estimateCostCny({ prompt_tokens: 32000, completion_tokens: 1000 }), .042); assert.equal(estimateCostCny({ prompt_tokens: 32001, completion_tokens: 1000 }), .063002);
-  assert.equal(estimateCostCny({ prompt_tokens: 128001, completion_tokens: 1000 }), .414003); assert.equal(estimateCostCny({ prompt_tokens: 256001, completion_tokens: 0 }), null); assert.equal(estimateCostCny(), null);
+  assert.equal(estimateCostCny({ prompt_tokens: 32000, completion_tokens: 1000 }, 'qwen3-vl-plus'), .042); assert.equal(estimateCostCny({ prompt_tokens: 32001, completion_tokens: 1000 }, 'qwen3-vl-plus'), .063002);
+  assert.equal(estimateCostCny({ prompt_tokens: 128001, completion_tokens: 1000 }, 'qwen3-vl-plus'), .414003); assert.equal(estimateCostCny({ prompt_tokens: 256001, completion_tokens: 0 }, 'qwen3-vl-plus'), null); assert.equal(estimateCostCny(), null);
 });
 const pendingFetch = (_url, options) => new Promise((_resolve, reject) => {
   if (options.signal.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }

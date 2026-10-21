@@ -57,12 +57,10 @@ npm run dev
 
 ## 模型选择（2026-10-21）
 
-模型清单在 `src/model-catalog.js`，按厂商与系列分组，包含现行型号和仍在服务的公开快照；已按官方下线公告排除退役型号。参考官方[视觉模型](https://help.aliyun.com/zh/model-studio/vision-model)、[模型上新](https://help.aliyun.com/zh/model-studio/newly-released-models)、[全模态](https://help.aliyun.com/zh/model-studio/qwen-omni)、[Kimi](https://help.aliyun.com/zh/model-studio/kimi-api)、[MiniMax](https://help.aliyun.com/zh/model-studio/minimax-api-by-minimax) 和 [Stepfun](https://help.aliyun.com/zh/model-studio/stepfun)。列表不会实时同步百炼；后续新型号可以选择“其他 / 新增百炼视频模型”填入准确 ID。自定义型号仍只请求固定百炼接口，不允许自定义服务地址。
+当前列表按照提供的免费额度型号清单，与官方视频理解能力清单取交集，保留 31 个型号及版本。默认 qwen3.7-plus；优先组还包含 qwen3.8-max、qwen3.8-flash 和 qwen3-vl-plus。其余千问、开源视觉、Omni 和 Kimi 型号分组保留，同一系列的快照按准确 ID 区分。
 
-`glm-5.3` 和 `deepseek-v4-pro-0813` 仅支持文本，列出但禁用。实时通话、视频生成、Embedding 等不同任务不列为逐跳复盘模型。当前用带时间戳的抽帧分析，不包含原视频音频。
+移除未在所提供清单中的直供型号、Prime 等条目，移除文本、OCR、图片/视频生成、语音、向量和实时通话型号。模型选择只允许这 31 个 ID，不保留自定义或自动回退入口；不会把主线型号替换成其快照来假定共享额度。
 
-模型是否可用、是否需要开通/授权、地域及免费额度是否到期都由百炼管理，网页不能查询或保证免费。只想使用免费额度，请在百炼控制台开启对应模型的“免费额度用完即停”。不自动回退到其他型号。
+模型清单在 src/model-catalog.js。网页不查询实时余额或保证调用免费；额度是否耗尽、过期及实际账单以百炼为准，请保留“免费额度用完即停”。不保存或发布账号额度、已用量、到期日期，也不上传原始额度清单。新增模型需要重新筛选后更新此列表。
 
-多模型测试用模拟响应验证各请求分支、流式读取、取消、用量与单价隔离，未消耗用户 Key 或免费额度，也不代表所有型号在此账号已开通。
-
-下线核对：[历史主线](https://www.aliyun.com/notice/118177)、[早批快照](https://www.aliyun.com/notice/118178)、[Omni/VL快照](https://www.aliyun.com/notice/118434)、[VL Flash](https://www.aliyun.com/notice/118344)、[开源VL](https://www.aliyun.com/notice/118345)。因此旧的 Qwen3-VL-Flash、QVQ、Qwen2.5-VL 等退役型号不会出现在可选列表。目录不把“仅支持图像”或“能够生成视频”误标为视频理解。
+能力依据：[视觉理解](https://help.aliyun.com/zh/model-studio/vision-model)、[Kimi](https://help.aliyun.com/zh/model-studio/kimi-api)、[Qwen-Omni](https://help.aliyun.com/zh/model-studio/qwen-omni)。当前使用带时间戳的抽帧，不发送音频；接口构造、流式解析、用量与边界测试使用模拟响应，不消耗用户免费额度。
