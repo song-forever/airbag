@@ -1,3 +1,4 @@
+import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.5.3';
 import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
@@ -317,7 +318,7 @@ async function selectRecord(record,{internal=false}={}) {
  ui.trimStart.max=record.duration;ui.trimEnd.max=record.duration;ui.trimStart.value=record.trimStart.toFixed(1);ui.trimEnd.value=record.trimEnd.toFixed(1);
  ui.trimLabel.textContent=record.trimStart.toFixed(1)+'–'+record.trimEnd.toFixed(1)+' 秒';ui.reviewAction.value=record.actionType||'直飞';ui.reviewActionDetail.value=record.actionDetail||'';
  ui.analyzeBtn.disabled=false;ui.analysisProgress.hidden=true;ui.analysisError.hidden=true;ui.analysisIdle.hidden=!!record.analysis;
- renderAnalysis();renderHistory();ui.reviewCount.textContent=String(records.length);
+ updateVideoSaveControls();renderAnalysis();renderHistory();ui.reviewCount.textContent=String(records.length);
 }
 function renderHistory() {
  ui.historyList.replaceChildren();ui.historyTotal.textContent=String(records.length);
@@ -447,7 +448,16 @@ async function analyzeCurrent() {
   clearTimeout(timer);if(run===analysisRun){analysisBusy=false;analysisController=null;ui.analysisProgress.hidden=true;ui.analyzeBtn.hidden=false;ui.armBtn.disabled=false;ui.importBtn.disabled=false;ui.nextJumpBtn.disabled=false;ui.deleteClipBtn.disabled=false;ui.applyTrimBtn.disabled=false;ui.reviewAction.disabled=false;ui.reviewActionDetail.disabled=false;}
  }
 }
-function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;a.rel='noopener';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),300000);}
+function updateVideoSaveControls(){
+ let available=false;try{available=!!current&&canShareVideo(makeVideoFile(current));}catch{}
+ ui.shareVideoBtn.hidden=!available;
+ ui.videoSaveHint.textContent=available?'可通过保存菜单选择“存储视频”或“存储到文件”。':'下载后可在浏览器的下载列表中查看视频。';
+}
+function downloadCurrentVideo(){
+ if(!current)return;
+ try{const file=makeVideoFile(current);download(file,file.name);toast('已请求下载原视频，请在浏览器下载列表中查看。');}catch(error){toast(error.message);}
+}
 ui.openCameraBtn.onclick=()=>openCamera().catch(err=>{toast(err.message);status(err.message,true);});
 ui.closeCameraBtn.onclick=closeCamera;ui.armBtn.onclick=armCapture;ui.stopBtn.onclick=()=>finishCapture('manual');
 ui.cancelBtn.onclick=()=>finishCapture('manual',true);
@@ -487,7 +497,18 @@ ui.reviewAction.onchange=ui.reviewActionDetail.onchange=async()=>{
  current.actionType=ui.reviewAction.value;current.actionDetail=ui.reviewActionDetail.value.trim();current.action=current.actionType+(current.actionDetail?' · '+current.actionDetail:'');
  current.analysis=null;current.keyframes=[];await persistRecord(current);ui.clipTitle.textContent=current.actionType;renderAnalysis();renderHistory();
 };
-ui.downloadVideoBtn.onclick=()=>{if(current)download(current.blob,'跃练-'+new Date(current.createdAt).toISOString().replace(/[:.]/g,'-')+(current.blob.type.includes('webm')?'.webm':'.mp4'));};
+ui.downloadVideoBtn.onclick=downloadCurrentVideo;
+ui.shareVideoBtn.onclick=async()=>{
+ if(!current)return;
+ try{
+  const file=makeVideoFile(current);
+  if(!canShareVideo(file)){downloadCurrentVideo();return;}
+  await navigator.share({files:[file],title:'跃练视频'});
+ }catch(error){
+  if(error.name==='AbortError')toast('已取消保存，视频仍保留在浏览器。');
+  else downloadCurrentVideo();
+ }
+};
 ui.exportReportBtn.onclick=()=>{if(!current?.analysis)return;download(new Blob([JSON.stringify({createdAt:new Date(current.createdAt).toISOString(),action:current.action,range:{start:current.trimStart,end:current.trimEnd},...current.analysis},null,2)],{type:'application/json'}),'跃练-动作分析.json');};
 ui.deleteClipBtn.onclick=async()=>{
  if(!current||analysisBusy)return;if(!confirm('删除这一跳在当前浏览器中的视频和分析？'))return;
