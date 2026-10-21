@@ -7,7 +7,8 @@ const JPEG = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224, 1, 2, 
 const input = (overrides = {}) => ({ apiKey: KEY, model: 'qwen3-vl-plus', action: '直飞', duration: 6.2,
   frames: [0, 1.5, 3.7, 4.2].map((time) => ({ time, dataUrl: JPEG })), ...overrides });
 const nextJump = { instruction: '延续本跳稳定的肩线。', reason: '腾空时肩线保持稳定，值得继续保持。', check: '回看时肩线是否同样平稳。', time: 3.7 };
-const content = (overrides = {}) => JSON.stringify({ nextJump, ...overrides });
+const stages = ['助滑','上台','起跳','腾空'].map(phase => ({ phase, analysis: phase+'阶段动作表现。', time: null }));
+const content = (overrides = {}) => JSON.stringify({ stages, nextJump, ...overrides });
 const upstream = (text = content(), usage = { prompt_tokens: 16000, completion_tokens: 700, total_tokens: 16700 }) =>
   new Response(JSON.stringify({ choices: [{ message: { content: text } }], usage }));
 const rejectsCode = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code); assert.ok(!error.message.includes(KEY)); return true; });
@@ -27,7 +28,7 @@ test('browser sends only to official endpoint, no cookies or key in JSON, bounde
     return upstream();
   } });
   assert.equal(called, 1); assert.equal(result.model, 'qwen3-vl-plus'); assert.equal(result.sampling, 'frames'); assert.equal(result.frameCount, 4);
-  assert.equal(result.estimatedCostCny, .023); assert.equal(result.analysis.nextJump.time, 3.7); assert.equal(result.analysis.schemaVersion, 2); assert.equal(result.analysis.limitations, undefined);
+  assert.equal(result.estimatedCostCny, .023); assert.equal(result.analysis.nextJump.time, 3.7); assert.equal(result.analysis.schemaVersion, 3); assert.equal(result.analysis.limitations, undefined);
   assert.ok(!JSON.stringify(result).includes(KEY));
 });
 test('supports default model and a 240-character goal', async () => {
@@ -73,7 +74,7 @@ test('CORS and network failures return an honest combined browser error', async 
 });
 test('single-point schema accepts fenced JSON, anchors timestamps, and drops unsolicited fields', async () => {
   const result = await analyzeFrames(input(), { fetchImpl: async () => upstream('```json\n' + content({ nextJump: { ...nextJump, time: 4.201 }, summary: '换机位', limitations: ['补拍'], observations: [{ time: 0 }] }) + '\n```') });
-  assert.deepEqual(result.analysis, { schemaVersion: 2, nextJump: { ...nextJump, time: 4.2 } });
+  assert.deepEqual(result.analysis, { schemaVersion: 3, stages, nextJump: { ...nextJump, time: 4.2 } });
   for (const time of [5.9, null, '3.7']) {
     const unanchored = await analyzeFrames(input(), { fetchImpl: async () => upstream(content({ nextJump: { ...nextJump, time } })) });
     assert.equal(unanchored.analysis.nextJump.time, null);
@@ -123,4 +124,18 @@ test('timeout aborts fetch and response-body streaming; success cleans up timeou
   let signal; const external = new AbortController();
   const result = await analyzeFrames(input(), { signal: external.signal, timeoutMs: 10, fetchImpl: async (_url, options) => { signal = options.signal; return upstream(); } });
   assert.equal(result.model, 'qwen3-vl-plus'); external.abort(); await new Promise((resolve) => setTimeout(resolve, 25)); assert.equal(signal.aborted, false);
+});
+
+test('stage reports retain the four phases in order and anchor their replay times', async () => {
+  const supplied = [...stages].reverse().map(stage => ({ ...stage, time: stage.phase === '起跳' ? 3.701 : 5.9 }));
+  const result = await analyzeFrames(input(), { fetchImpl: async () => upstream(content({ stages: supplied })) });
+  assert.deepEqual(result.analysis.stages.map(stage => stage.phase), ['助滑','上台','起跳','腾空']);
+  assert.equal(result.analysis.stages[2].time, 3.7);
+  assert.equal(result.analysis.stages[0].time, null);
+  assert.deepEqual(result.analysis.nextJump, nextJump);
+});
+test('incomplete, duplicate, empty and landing stages cannot replace the requested phase report', async () => {
+  for (const invalidStages of [undefined, stages.slice(1), [...stages.slice(0,3), stages[0]], stages.map((stage,i) => i === 0 ? { ...stage, analysis: ' ' } : stage), [...stages.slice(0,3), { phase:'落地', analysis:'不应分析落地', time:null }]]) {
+    await rejectsCode(analyzeFrames(input(), { fetchImpl: async () => upstream(content({ stages: invalidStages })) }), 'invalid_analysis');
+  }
 });

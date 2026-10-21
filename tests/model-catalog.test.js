@@ -5,7 +5,7 @@ import { analyzeFrames, estimateCostCny } from '../src/analysis-client.js';
 const key='sk-test-only-not-a-real-key-12345';
 const jpeg='data:image/jpeg;base64,'+Buffer.from([255,216,255,224,1,2,255,217]).toString('base64');
 const payload=model=>({apiKey:key,model,duration:6,action:'直飞',frames:[0,1,3,5].map(time=>({time,dataUrl:jpeg}))});
-const answer=JSON.stringify({nextJump:{instruction:'保持肩线稳定',reason:'本跳腾空肩线平稳',check:'肩线是否同样平稳',time:3}});
+const answer=JSON.stringify({stages:['助滑','上台','起跳','腾空'].map(phase=>({phase,analysis:phase+'动作表现',time:null})),nextJump:{instruction:'保持肩线稳定',reason:'本跳腾空肩线平稳',check:'肩线是否同样平稳',time:3}});
 function sse(answerText=answer){return new Response([
  'data: '+JSON.stringify({choices:[{delta:{reasoning_content:'PRIVATE REASONING'}}]})+'\r\n\r\n',
  'data: '+JSON.stringify({choices:[{delta:{content:answerText.slice(0,17)}}]})+'\r\n\r\n',

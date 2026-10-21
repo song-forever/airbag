@@ -1,5 +1,5 @@
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.5.3';
 import { getFrameTimes } from './frame-sampling.js';
 import { JumpTracker } from './tracker.js?v=6764207';
 const $ = (id) => document.getElementById(id);
@@ -173,7 +173,7 @@ function detectFrameChange(video) {
  drift/=gray.length;let changed=0;
  for(let i=0;i<gray.length;i++)if(Math.abs(gray[i]-previousMotionFrame[i]-drift)>18)changed++;
  previousMotionFrame=gray;
- return changed>=Math.max(18,gray.length*.006);
+ return changed>=Math.max(18,gray.length*.05);
 }
 function startMotionRecording(detections) {
  const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
@@ -350,7 +350,16 @@ function renderAnalysis() {
  ui.analyzeBtn.textContent=data?'重新分析这一跳 ↗':'分析这一跳 ↗';
  if(!data)return;
  const a=data.analysis;
- if(a?.schemaVersion===2&&a.nextJump){
+ if([2,3].includes(a?.schemaVersion)&&a.nextJump){
+  if(a.schemaVersion===3&&Array.isArray(a.stages)){
+   for(const stage of a.stages){
+    const row=document.createElement('div');row.className='observation';const head=document.createElement('div');head.className='observation-head';
+    appendText(head,'strong',stage.phase);
+    const t=stage.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(head,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
+    row.append(head);appendText(row,'p',stage.analysis);result.append(row);
+   }
+  }
+  appendText(result,'h3','总体分析');
   const next=a.nextJump,box=document.createElement('div');box.className='focus-box';
   appendText(box,'small','下一跳，只做这一件事');appendText(box,'p',next.instruction);result.append(box);
   appendText(result,'p',next.reason);
