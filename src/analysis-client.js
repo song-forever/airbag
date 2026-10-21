@@ -1,10 +1,11 @@
+import { DEFAULT_MODEL, getModel } from './model-catalog.js';
+export { DEFAULT_MODEL } from './model-catalog.js';
 /**
  * Browser-only Qwen client for a static HTTPS site.
  * The key is sent directly to the fixed official endpoint, never to the site host.
  * No storage, cookies, logs, Node APIs, or third-party relay are used here.
  */
 export const QWEN_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
-export const DEFAULT_MODEL = 'qwen3-vl-plus';
 export const MAX_FRAME_BYTES = 500 * 1024;
 export const MAX_BODY_BYTES = 18 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -53,7 +54,7 @@ function validatePayload(payload) {
   if (typeof apiKey !== 'string' || !/^[A-Za-z0-9._-]{16,256}$/.test(apiKey)) {
     throw problem('invalid_api_key', '请在设置中填写有效的阿里云百炼北京地域 API Key。');
   }
-  if (model !== DEFAULT_MODEL) throw problem('unsupported_model', '第一轮测试仅支持 qwen3-vl-plus，请在设置中选择该模型。');
+  if (!getModel(model, { allowCustom: true })) throw problem('unsupported_model', '此型号不能用于视频分析，请选择百炼视频理解模型。');
   if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0 || duration > 60) {
     throw problem('invalid_duration', '请选择不超过 60 秒的视频片段。');
   }
@@ -85,18 +86,30 @@ function makeProviderPayload(payload) {
     content.push({ type: 'text', text: `片段时间 ${frame.time.toFixed(3)} 秒：` });
     content.push({ type: 'image_url', image_url: { url: frame.dataUrl } });
   }
-  return {
+  const config = getModel(payload.model, { allowCustom: true });
+  const request = {
     model: payload.model,
     messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content }],
-    enable_thinking: false,
-    max_tokens: 1400,
-    stream: false,
+    max_tokens: config.thinking || config.custom ? 8192 : 1400,
+    stream: !!config.stream,
   };
+  if (typeof config.thinking === 'boolean' && !config.thinking) request.enable_thinking = false;
+  if (config.minimax) request.thinking = { type: 'disabled' };
+  if (config.stream) request.stream_options = { include_usage: true };
+  if (config.omni) {
+    request.modalities = ['text'];
+    // Omni models accept video frame lists, including the older single-modality models.
+    const timing = payload.frames.map((frame, i) => (i + 1) + ':' + frame.time.toFixed(3) + 's').join(', ');
+    request.messages[1].content = [content[0], { type: 'text', text: '以下视频帧依次对应时间：' + timing }, { type: 'video', video: payload.frames.map(frame => frame.dataUrl) }];
+    if (payload.model.startsWith('qwen3-omni-flash')) request.enable_thinking = false;
+    if (payload.model === 'qwen3.8-omni-flash') request.reasoning_effort = 'none';
+  }
+  return request;
 }
 function text(value, max = 2000) { return typeof value === 'string' ? value.trim().slice(0, max) : ''; }
 function parseAnalysis(content, frames) {
   const rawText = text(content, 18_000);
-  if (!rawText) throw problem('empty_analysis', '千问没有返回分析内容，请重试。');
+  if (!rawText) throw problem('empty_analysis', '百炼模型没有返回分析内容，请重试。');
   const unfenced = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   let candidate;
   try { candidate = JSON.parse(unfenced); } catch { return { rawText }; }
@@ -123,26 +136,35 @@ function parseUsage(usage) {
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
 }
 /** Beijing public list price; actual bills may have discounts. */
-export function estimateCostCny(usage) {
+export function estimateCostCny(usage, model = DEFAULT_MODEL) {
   const input = usage?.prompt_tokens, output = usage?.completion_tokens;
   if (!Number.isSafeInteger(input) || input < 0 || !Number.isSafeInteger(output) || output < 0 || input > 256_000) return null;
-  const [inputRate, outputRate] = input <= 32_000 ? [1, 10] : input <= 128_000 ? [1.5, 15] : [3, 30];
+  // Never reuse VL-Plus pricing for an unrelated model. Unknown rates remain unknown.
+  if (!getModel(model)) return null;
+  let rates;
+  if (/^qwen3-vl-plus(?:-|$)/.test(model)) rates = input <= 32_000 ? [1, 10] : input <= 128_000 ? [1.5, 15] : [3, 30];
+  else if (/^qwen3-vl-flash(?:-|$)/.test(model)) rates = input <= 32_000 ? [.15, 1.5] : input <= 128_000 ? [.3, 3] : [.6, 6];
+  if (!rates) return null;
+  const [inputRate, outputRate] = rates;
   return Number(((input * inputRate + output * outputRate) / 1_000_000).toFixed(6));
 }
 function providerError(status) {
-  if (status === 401) return problem('provider_auth_failed', '千问未接受此 API Key，请检查北京地域密钥是否正确。', status);
-  if (status === 403) return problem('provider_forbidden', '当前密钥没有所选模型的调用权限，请检查百炼控制台。', status);
-  if (status === 429) return problem('provider_rate_limited', '千问暂时无法接受请求，请检查账户额度或稍后重试。', status);
-  if ([400, 404, 422].includes(status)) return problem('provider_request_rejected', '千问未接受本次分析，请检查模型是否已开通，或减少分析画面后重试。', status);
-  return problem('provider_unavailable', '千问服务暂时不可用，请稍后重试；视频仍保存在本机。', status);
+  if (status === 401) return problem('provider_auth_failed', '百炼模型未接受此 API Key，请检查北京地域密钥是否正确。', status);
+  if (status === 403) return problem('provider_forbidden', '请在百炼检查该模型的开通权限，以及免费额度是否用尽或过期。', status);
+  if (status === 429) return problem('provider_rate_limited', '百炼模型暂时无法接受请求，请检查账户额度或稍后重试。', status);
+  if ([400, 404, 422].includes(status)) return problem('provider_request_rejected', '百炼模型未接受本次分析，请检查模型是否可用、账户余额及免费额度，或减少分析画面后重试。', status);
+  return problem('provider_unavailable', '百炼模型服务暂时不可用，请稍后重试；视频仍保存在本机。', status);
 }
 async function readResponseJson(response) {
+  const isEventStream = response.headers.get('content-type')?.includes('text/event-stream');
+  // SSE includes event envelopes and discarded reasoning, so its wire limit is larger.
+  const wireLimit = isEventStream ? 4 * 1024 * 1024 : MAX_RESPONSE_BYTES;
   const length = response.headers.get('content-length');
-  if (length && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) {
+  if (length && (!/^\d+$/.test(length) || Number(length) > wireLimit)) {
     await response.body?.cancel().catch(() => {});
-    throw problem('provider_response_too_large', '千问返回内容过大，请稍后重新分析。');
+    throw problem('provider_response_too_large', '百炼模型返回内容过大，请稍后重新分析。');
   }
-  if (!response.body) throw problem('invalid_provider_response', '千问返回了空结果，请重试。');
+  if (!response.body) throw problem('invalid_provider_response', '百炼模型返回了空结果，请重试。');
   const reader = response.body.getReader(), chunks = [];
   let count = 0;
   try {
@@ -150,9 +172,9 @@ async function readResponseJson(response) {
       const { done, value } = await reader.read();
       if (done) break;
       count += value.byteLength;
-      if (count > MAX_RESPONSE_BYTES) {
+      if (count > wireLimit) {
         await reader.cancel().catch(() => {});
-        throw problem('provider_response_too_large', '千问返回内容过大，请稍后重新分析。');
+        throw problem('provider_response_too_large', '百炼模型返回内容过大，请稍后重新分析。');
       }
       chunks.push(value);
     }
@@ -160,8 +182,31 @@ async function readResponseJson(response) {
   const bytes = new Uint8Array(count);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
-  catch { throw problem('invalid_provider_response', '千问返回了无法读取的结果，请重试。'); }
+  try {
+    const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (!isEventStream && !body.trimStart().startsWith('data:')) {
+      const data = JSON.parse(body);
+      if (data.choices?.[0]?.finish_reason && data.choices[0].finish_reason !== 'stop') throw new Error('Incomplete answer');
+      return data;
+    }
+    let content = '', usage, ended = false;
+    for (const event of body.replaceAll('\r\n', '\n').split('\n\n')) {
+      const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+      if (!data) continue;
+      if (data === '[DONE]') continue;
+      const chunk = JSON.parse(data);
+      if (chunk.error) throw new Error('Provider stream error');
+      const choice = chunk.choices?.[0];
+      if (typeof choice?.delta?.content === 'string') content += choice.delta.content;
+      if (content.length > MAX_RESPONSE_BYTES) throw new Error('Answer too large');
+      if (choice?.finish_reason && choice.finish_reason !== 'stop') throw new Error('Incomplete answer');
+      if (choice?.finish_reason === 'stop') ended = true;
+      if (chunk.usage) usage = chunk.usage;
+    }
+    if (!ended) throw new Error('Incomplete stream');
+    return { choices: [{ message: { content } }], usage };
+  }
+  catch { throw problem('invalid_provider_response', '百炼模型返回了无法读取的结果，请重试。'); }
 }
 
 /**
@@ -200,16 +245,16 @@ export async function analyzeFrames(payload, { signal, fetchImpl = fetch, timeou
     const usage = parseUsage(data.usage);
     return {
       analysis, usage, model: validated.model,
-      estimatedCostCny: estimateCostCny(usage),
-      costBasis: '北京地域公开单价估算，不含折扣及重试费用',
+      estimatedCostCny: estimateCostCny(usage, validated.model),
+      costBasis: '北京地域标价估算，免费额度抵扣前；是否扣费以百炼账单为准',
       sampling: 'frames', frameCount: validated.frames.length,
     };
   } catch (error) {
-    if (timedOut) throw problem('analysis_timeout', '千问分析等待超时，请稍后重试；视频仍保存在本机。');
+    if (timedOut) throw problem('analysis_timeout', '百炼模型分析等待超时，请稍后重试；视频仍保存在本机。');
     if (signal?.aborted) throw cancelled();
     if (error instanceof AnalysisError) throw error;
     // Browsers intentionally do not distinguish a CORS rejection from many network failures.
-    throw problem('provider_network_or_cors', '浏览器无法直接连接千问。请检查网络，并使用 Safari 打开正式 HTTPS 测试链接重试；也可能是接口跨域访问受限。');
+    throw problem('provider_network_or_cors', '浏览器无法直接连接百炼模型。请检查网络，并使用 Safari 打开正式 HTTPS 测试链接重试；也可能是接口跨域访问受限。');
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener('abort', onAbort);

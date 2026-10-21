@@ -1,8 +1,9 @@
+import { VIDEO_MODELS, TEXT_ONLY_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames } from './analysis-client.js';
 import { JumpTracker } from './tracker.js';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
-let apiKey = '', autoAnalyze = false, model = 'qwen3-vl-plus';
+let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
 let action = '直飞', actionDetail = '', focus = '';
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let armed = false, processing = false, recorder = null, chunks = [], recordingStart = 0, departureAt = null;
@@ -27,7 +28,23 @@ function setView(view) {
  ui.captureTab.classList.toggle('active',view==='capture'); ui.reviewTab.classList.toggle('active',view==='review');
  if(view==='review') renderHistory();
 }
-function showSettings() {ui.apiKeyInput.value=apiKey;ui.autoAnalyzeInput.checked=autoAnalyze;ui.modelSelect.value=model;ui.settingsDialog.showModal();}
+function updateModelHint() {
+ const custom=ui.modelSelect.value==='__custom';ui.customModelField.hidden=!custom;
+ const selected=custom?getModel(ui.customModelInput.value.trim(),{allowCustom:true}):getModel(ui.modelSelect.value);
+ ui.modelHint.textContent=custom?'填写百炼控制台中的完整视频理解模型 ID，使用当前北京地域 Key；新增型号的兼容性需实际验证。':(selected?.thinking?'此模型始终开启思考，可能需要更长时间。':'按模型支持的方式调用；优先使用非思考模式。')+' 当前发送视频画面，不发送音频。';
+}
+function populateModels() {
+ const groups=new Map();ui.modelSelect.replaceChildren();
+ for(const entry of VIDEO_MODELS){let group=groups.get(entry.group);if(!group){group=document.createElement('optgroup');group.label=entry.group;groups.set(entry.group,group);ui.modelSelect.append(group);}const option=document.createElement('option');option.value=entry.id;option.textContent=entry.id+(entry.thinking?' · 思考模式':'');group.append(option);}
+ const unsupported=document.createElement('optgroup');unsupported.label='仅支持文本，不能分析视频';
+ for(const id of TEXT_ONLY_MODELS){const option=document.createElement('option');option.value=id;option.textContent=id+' · 不支持视频';option.disabled=true;unsupported.append(option);}ui.modelSelect.append(unsupported);
+ const other=document.createElement('option');other.value='__custom';other.textContent='其他 / 新增百炼视频模型…';ui.modelSelect.append(other);
+ ui.modelCatalogInfo.textContent=VIDEO_MODELS.length+' 个视频模型及版本 · 清单核对 '+CATALOG_DATE+' · 可用地域和额度以控制台为准';
+ ui.modelSelect.value=model;updateModelHint();
+}
+function showSettings() {ui.apiKeyInput.value=apiKey;ui.autoAnalyzeInput.checked=autoAnalyze;ui.modelSelect.value=VIDEO_MODELS.some(entry=>entry.id===model)?model:'__custom';ui.customModelInput.value=ui.modelSelect.value==='__custom'?model:'';updateModelHint();ui.settingsDialog.showModal();}
+populateModels();
+ui.modelSelect.onchange=updateModelHint;
 function persistGoal() {
  try {localStorage.setItem('airbag-goal-v1',JSON.stringify({action,actionDetail,focus}));}catch{}
 }
@@ -216,7 +233,7 @@ async function finalizeRecording() {
   if(!Number.isFinite(meta.duration)||meta.duration<=0)meta.duration=elapsed;
   const clip={id:crypto.randomUUID(),createdAt:Date.now(),source:'camera',name:'现场拍摄',blob,duration:meta.duration,width:meta.width,height:meta.height,action:detectedAction,actionType:action,actionDetail,focus,trimStart:Math.min(departedOffset,meta.duration-.1),trimEnd:meta.duration,reason:pendingReason,note:reasons[pendingReason]||'自动检测结束',poster:'',analysis:null};
   clip.poster=await getPoster(blob,clip.trimStart+.1);records.unshift(clip);await persistRecord(clip);await selectRecord(clip,{internal:true});setView('review');window.scrollTo({top:0,behavior:'smooth'});
-  if(shouldAnalyze)setTimeout(()=>{if(current===clip)analyzeCurrent();},0);else if(autoAnalyze&&!apiKey)toast('录像已保存。请在设置中填写千问 Key 后分析。');
+  if(shouldAnalyze)setTimeout(()=>{if(current===clip)analyzeCurrent();},0);else if(autoAnalyze&&!apiKey)toast('录像已保存。请在设置中填写百炼模型 Key 后分析。');
  }catch(err){toast('录像处理失败：'+err.message);}
  finally{finishing=false;recorder=null;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(false);}
 }
@@ -286,7 +303,7 @@ function renderAnalysis() {
   if(Array.isArray(a.limitations)&&a.limitations.length)appendText(result,'p','判断范围：'+a.limitations.join('；'),'limitations');
  }
  if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+frame.time;ui.reviewVideo.pause();};strip.append(btn);}result.append(strip);}
- const u=data.usage||{};appendText(result,'div',data.model+' · 抽帧分析，非逐帧结论\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'估算 ¥'+data.estimatedCostCny.toFixed(4)+'（不含优惠）':''),'usage');
+ const u=data.usage||{};appendText(result,'div',data.model+' · 抽帧分析，非逐帧结论\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
 }
 async function extractFrames(record,signal) {
  const start=record.trimStart,end=record.trimEnd,duration=end-start;
@@ -308,14 +325,14 @@ async function extractFrames(record,signal) {
 }
 async function analyzeCurrent() {
  if(!current||analysisBusy||armed||processing||finishing){if(armed||processing||finishing)toast('请先结束拍摄并等待保存完成。');return;}
- if(!apiKey){showSettings();toast('先填写自己的千问 Key，再点击分析。');return;}
- if(!autoAnalyze){const yes=confirm('本次将把抽取画面直接发送至阿里云千问，并产生 API 费用。是否继续？');if(!yes)return;}
+ if(!apiKey){showSettings();toast('先填写自己的百炼模型 Key，再点击分析。');return;}
+ if(!autoAnalyze){const yes=confirm('本次将把抽取画面直接发送至阿里云百炼模型，并产生 API 费用。是否继续？');if(!yes)return;}
  const record=current,run=++analysisRun;analysisController=new AbortController();analysisBusy=true;record.actionType=ui.reviewAction.value;record.actionDetail=ui.reviewActionDetail.value.trim();record.action=record.actionType+(record.actionDetail?' · '+record.actionDetail:'')+(record.focus?'；关注：'+record.focus:'');
  ui.analysisProgress.hidden=false;ui.analysisIdle.hidden=true;ui.analysisResult.hidden=true;ui.analysisError.hidden=true;ui.analyzeBtn.hidden=true;ui.analysisMeter.value=0;ui.progressTitle.textContent='正在准备画面';ui.armBtn.disabled=true;ui.importBtn.disabled=true;ui.nextJumpBtn.disabled=true;ui.deleteClipBtn.disabled=true;ui.applyTrimBtn.disabled=true;ui.reviewAction.disabled=true;ui.reviewActionDetail.disabled=true;
  let timer=null;
  try {
   const frames=await extractFrames(record,analysisController.signal);
-  ui.progressTitle.textContent='千问正在看这一跳';ui.progressDetail.textContent='正在分析助滑、起跳与腾空。可先在左侧慢放回看。';ui.analysisMeter.value=65;
+  ui.progressTitle.textContent='百炼模型正在看这一跳';ui.progressDetail.textContent='正在分析助滑、起跳与腾空。可先在左侧慢放回看。';ui.analysisMeter.value=65;
   const data=await analyzeFrames({apiKey,model,frames,action:record.action,duration:record.trimEnd-record.trimStart},{signal:analysisController.signal});
   if(run!==analysisRun)return;
   record.analysis=data;record.keyframes=frames.filter((_,i)=>i%Math.max(1,Math.floor(frames.length/6))===0).slice(0,6);await persistRecord(record);
@@ -339,9 +356,11 @@ ui.settingsForm.onsubmit=e=>{
  e.preventDefault();const value=ui.apiKeyInput.value.trim();
  if(value&&(/[\s\r\n]/.test(value)||value.length<16)){toast('请填写完整的百炼 API Key。');return;}
  if(ui.autoAnalyzeInput.checked&&!value){toast('开启自动分析前，请先填写 API Key。');return;}
- apiKey=value;autoAnalyze=ui.autoAnalyzeInput.checked;model=ui.modelSelect.value;ui.apiKeyInput.value='';ui.settingsDialog.close();
- ui.analysisPrivacy.textContent=apiKey?'已连接千问 · 密钥仅本次打开有效'+(autoAnalyze?' · 已允许每跳自动分析':''):'仅将抽取画面发送到千问；需要填写自己的 API Key。';
- toast(apiKey?'本次设置已保存。':'本地回放模式，无需千问 Key。');
+ const selectedModel=ui.modelSelect.value==='__custom'?ui.customModelInput.value.trim():ui.modelSelect.value;
+ if(!getModel(selectedModel,{allowCustom:true})){toast('请选择视频理解模型，或填写正确的百炼视频模型 ID。');return;}
+ apiKey=value;autoAnalyze=ui.autoAnalyzeInput.checked;model=selectedModel;ui.apiKeyInput.value='';ui.settingsDialog.close();
+ ui.analysisPrivacy.textContent=apiKey?'已连接百炼模型 · 密钥仅本次打开有效'+(autoAnalyze?' · 已允许每跳自动分析':''):'仅将抽取画面发送到百炼模型；需要填写自己的 API Key。';
+ toast(apiKey?'本次设置已保存。':'本地回放模式，无需百炼模型 Key。');
 };
 ui.clearKeyBtn.onclick=()=>{apiKey='';autoAnalyze=false;ui.apiKeyInput.value='';ui.autoAnalyzeInput.checked=false;toast('密钥已清除，自动分析已关闭。');};
 document.querySelectorAll('[data-action]').forEach(btn=>btn.onclick=()=>{if(action!==btn.dataset.action){actionDetail='';ui.actionDetail.value='';}updateAction(btn.dataset.action);});
