@@ -11,11 +11,15 @@ let armed = false, processing = false, recorder = null, chunks = [], recordingSt
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let analysisController = null, analysisBusy = false, analysisRun = 0;
 let tracker = new JumpTracker({maxDurationMs:18000, lostGraceMs:2200});
+const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
+const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
+let previousMotionFrame=null,motionSince=null,lastMotionAt=null;
 const formatTime = (t) => Number.isFinite(t) ? Math.floor(t/60).toString().padStart(2,'0') + ':' + Math.floor(t%60).toString().padStart(2,'0') : '00:00';
 const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 const reasons = {
  target_lost_after_receding:'目标远离并离开视野后，延时结束',
  visible_arc_finished:'根据目标运动变化，估计本次尝试结束',
+ motion_finished:'画面恢复稳定后，延时结束本次录像',
  max_duration:'达到最长拍摄时间，已保留录像',
  manual:'手动结束拍摄', interrupted:'页面离开前台，录像已中断',
  waiting_timeout:'等待出发超时，保留当前录像',
@@ -138,11 +142,27 @@ function drawTarget(rect) {
  ctx.strokeStyle='#d9edaa';ctx.lineWidth=2*devicePixelRatio;ctx.setLineDash([10*devicePixelRatio,5*devicePixelRatio]);ctx.strokeRect(x,y,w,h);
  ctx.fillStyle='#d9edaa';ctx.font=(10*devicePixelRatio)+'px sans-serif';ctx.fillText('本次目标',Math.max(5,x),Math.max(14*devicePixelRatio,y-8*devicePixelRatio));
 }
+function detectFrameChange(video) {
+ motionContext.drawImage(video,0,0,motionCanvas.width,motionCanvas.height);
+ const pixels=motionContext.getImageData(0,0,motionCanvas.width,motionCanvas.height).data;
+ const gray=new Uint8Array(pixels.length/4);let drift=0;
+ for(let i=0,j=0;i<pixels.length;i+=4,j++){
+  gray[j]=(pixels[i]*77+pixels[i+1]*150+pixels[i+2]*29)>>8;
+  if(previousMotionFrame)drift+=gray[j]-previousMotionFrame[j];
+ }
+ if(!previousMotionFrame){previousMotionFrame=gray;return false;}
+ // Remove a uniform brightness shift so automatic exposure alone is less
+ // likely to count as a departure. No person-size or stationary lock is needed.
+ drift/=gray.length;let changed=0;
+ for(let i=0;i<gray.length;i++)if(Math.abs(gray[i]-previousMotionFrame[i]-drift)>18)changed++;
+ previousMotionFrame=gray;
+ return changed>=Math.max(18,gray.length*.006);
+}
 async function armCapture() {
  if(armed||processing||finishing||analysisBusy)return;
  processing=true;ui.armBtn.disabled=true;ui.armLabel.textContent='正在准备…';setCaptureControls(false);
  try{
-  await openCamera();await loadDetector();
+  await openCamera();
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
   const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
@@ -151,8 +171,10 @@ async function armCapture() {
   recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
   recorder.onerror=()=>finishCapture('track_ended');
   recorder.onstop=finalizeRecording;
-  recorder.start(1000);armed=true;tracker.reset();setCaptureControls(true);await keepAwake();
-  ui.cameraBadge.innerHTML='<i></i> WAITING FOR RIDER';ui.cameraHint.textContent='自动检测已就绪 · 等待出发';status('等待第一个出发的人 · 跟踪框出现后再出发');
+  recorder.start(1000);armed=true;tracker.reset();previousMotionFrame=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);await keepAwake();
+  // Person detection helps follow the attempt, but must not block motion start.
+  loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
+  ui.cameraBadge.innerHTML='<i></i> WAITING FOR MOTION';ui.cameraHint.textContent='检测画面变化 · 自动判断出发';status('等待画面变化 · 无需先锁定人物');
   armTimer=setInterval(()=>{
    const now=performance.now();ui.recordClock.textContent=departureAt?formatTime((now-departureAt)/1000):'等待中';
    if(!departureAt&&now-recordingStart>60000)finishCapture('waiting_timeout');
@@ -163,19 +185,30 @@ async function armCapture() {
  finally{processing=false;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(armed);}
 }
 function detectLoop() {
- if(!armed||!detector||!stream)return;
+ if(!armed||!stream)return;
  const started=performance.now();
  try{
   const video=ui.cameraVideo;
   if(video.readyState>=2&&video.videoWidth){
-   const result=detector.detectForVideo(video,performance.now());
-   const detections=(result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
-   const info=tracker.update(detections,performance.now());drawTarget(info.target);
-   if(info.state==='recording'&&!departureAt){departureAt=performance.now();ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');ui.cameraHint.textContent='正在记录这一跳';status('已检测到出发，正在跟踪本次滑手');}
-   else if(info.state==='locked'&&!departureAt){status('目标已锁定 · 等待出发');ui.cameraHint.textContent='已锁定镜头前滑手';}
-   else if(info.state==='waiting'&&!departureAt){status('等待出发 · 请保持目标在画面中');}
-   if(info.reason==='target_temporarily_lost'&&departureAt)status('目标暂时被遮挡，继续保留录像');
+   const now=performance.now(),changed=detectFrameChange(video);if(changed)lastMotionAt=now;
+   let detections=[];
+   if(detector){try{
+    const result=detector.detectForVideo(video,now);
+    detections=(result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
+   }catch{/* Motion detection continues if person inference fails. */}}
+   if(departureAt===null){
+    if(changed){
+     if(motionSince===null)motionSince=now;
+     if(now-motionSince>=120){
+      departureAt=motionSince;tracker.startFromMotion(detections,departureAt);
+      ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');ui.cameraHint.textContent='正在记录这一跳';status('已检测到画面运动，开始记录本次出发');
+     }
+    }else motionSince=null;
+   }
+   const info=departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
+   drawTarget(info.target);
    if(info.state==='complete'){finishCapture(info.reason);return;}
+   if(departureAt!==null&&!detections.length&&now-departureAt>=6000&&lastMotionAt!==null&&now-lastMotionAt>=2200){finishCapture('motion_finished');return;}
   }
  }catch{status('跟踪暂时中断，录像继续；可手动结束',true);}
  inferenceTimer=setTimeout(detectLoop,Math.max(40,180-(performance.now()-started)));

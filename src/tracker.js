@@ -32,6 +32,16 @@ export class JumpTracker {
     this.previousTime=null; this.departureSince=null; this.recordingStarted=null;
     this.receded=false; this.velocity={x:0,y:0}; this.arc=null; this.observedPhase='approach';
   }
+  startFromMotion(input,nowMs) {
+    if(!Number.isFinite(nowMs)) throw new TypeError('nowMs must be a finite timestamp');
+    this.reset();
+    this.state='recording';this.reason='motion_departure';this.recordingStarted=nowMs;
+    this.previousTime=nowMs;
+    const target=(Array.isArray(input)?input:[]).map(normalize).filter(r=>r&&r.score>=0.3)
+      .sort((a,b)=>area(b)*b.score-area(a)*a.score)[0];
+    if(target){this.target=target;this.baseline={...target};this.lastSeen=nowMs;}
+    return this.result(nowMs);
+  }
   result(now) {
     return {state:this.state,target:this.target?{...this.target}:null,reason:this.reason,
       confidence:this.target?.score??0,
@@ -61,6 +71,13 @@ export class JumpTracker {
     if(this.state==='waiting') return this.findCandidate(detections,now);
     if(this.recordingStarted!==null && now-this.recordingStarted>=this.maxDurationMs) {
       this.state='complete';this.reason='max_duration';return this.result(now);
+    }
+    // Motion can start an attempt before the person detector returns a box.
+    if(this.state==='recording'&&!this.target) {
+      const target=detections.sort((a,b)=>area(b)*b.score-area(a)*a.score)[0];
+      if(target){this.target=target;this.baseline={...target};this.lastSeen=now;this.reason='tracking';}
+      else this.reason='target_temporarily_lost';
+      return this.result(now);
     }
     const match=this.associate(detections,this.target,now,this.lastSeen);
     if(!match) {
