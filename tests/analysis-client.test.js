@@ -27,6 +27,9 @@ test('browser sends only to official endpoint, no cookies or key in JSON, bounde
     assert.match(prompt, /证据最明确、与目标动作最相关、下一跳容易执行/); assert.match(prompt, /不声称或保证它的效果最大/);
     assert.match(prompt, /每阶段一至两句/); assert.doesNotMatch(prompt, /40 至 70/);
     assert.match(prompt, /指令用一句简短、具体的话表达/); assert.match(prompt, /下一跳回放中能直接观察到/);
+    assert.match(prompt, /即使目标动作已经完成，也要观察实际可见的舒展、节奏、身体与雪板的协调/);
+    assert.match(prompt, /纳入下一跳唯一建议的选择/); assert.match(prompt, /不把个人风格差异当成错误/);
+    assert.match(data.messages[1].content[0].text, /动作已完成时，也要依据可见表现观察动作质量/);
     assert.equal(data.messages[1].content.filter((part) => part.type === 'image_url').length, 4);
     assert.match(data.messages[1].content[5].text, /3\.700/);
     assert.equal(data.messages[1].content[6].image_url.url, JPEG);

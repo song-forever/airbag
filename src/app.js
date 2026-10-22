@@ -3,7 +3,7 @@ import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.7.0';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.7.1';
 import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
