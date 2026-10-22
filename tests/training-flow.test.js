@@ -14,11 +14,11 @@ const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(match=>match[1]);
 const phaseNames=['助滑','上台','起跳','腾空'];
 const frames=[0,.2,.4,.6].map(time=>({time,dataUrl:'data:image/jpeg;base64,/9j/2Q=='}));
 const followUp={status:'done',observation:'本跳能看到上一跳所选动作已保持。',time:.4};
-function report({schemaVersion=4,instruction='下一跳保持双手在身前',check='回看腾空时双手仍在身前',follow=followUp}={}){
- return {model:'qwen3.7-plus',frameCount:4,usage:{},analysis:{schemaVersion,stages:phaseNames.map(phase=>({phase,analysis:phase+'可见表现',time:null})),nextJump:{instruction,reason:'这是本跳最明确且易于执行的动作。',check,time:null},...(schemaVersion===4?{followUp:follow}:{})}};
+function report({schemaVersion=5,instruction='下一跳保持双手在身前',check='回看腾空时双手仍在身前',follow=followUp,type='直飞',description='本跳可见保持板身朝向前方。',relation=follow?'same':'none',practiceActionType=type}={}){
+ return {model:'qwen3.7-plus',frameCount:4,usage:{},analysis:{schemaVersion,stages:phaseNames.map(phase=>({phase,analysis:phase+'可见表现',time:null})),nextJump:{instruction,reason:'这是本跳最明确且易于执行的动作。',check,time:null},...(schemaVersion>=4?{followUp:follow}:{}),...(schemaVersion===5?{recognizedAction:{type,description,time:.4},focusRelation:relation,practiceActionType}:{})}};
 }
-function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysis=null}={}){
- const item={id,createdAt,actionType,actionDetail,focus,action:actionType+(actionDetail?' · '+actionDetail:''),source:'camera',blob:new Blob(['clip'],{type:'video/mp4'}),duration:6,width:720,height:1280,trimStart:0,trimEnd:6,note:'本机测试',keyframes:[],analysis};
+function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysis=null,actionMode='auto'}={}){
+ const item={id,createdAt,actionMode,actionType,actionDetail,focus,action:actionType+(actionDetail?' · '+actionDetail:''),source:'camera',blob:new Blob(['clip'],{type:'video/mp4'}),duration:6,width:720,height:1280,trimStart:0,trimEnd:6,note:'本机测试',keyframes:[],analysis};
  if(analysis&&imported.getTrainingContext)analysis.trainingGoalKey=imported.getTrainingContext(item,[]).goalKey;
  return item;
 }
@@ -35,9 +35,8 @@ function fixture(){
   getContext(){return {clearRect(){},drawImage(){},getImageData(){return {data:new Uint8Array(160*90*4)};}};}
  }
  const nodes=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
- const actions=['直飞','抓板','转体','自定义'].map(action=>{const el=new Element();el.dataset.action=action;return el;});
  const document=new EventTarget();document.hidden=false;document.body=new Element();document.getElementById=id=>nodes[id];document.createElement=tag=>new Element(tag);
- document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-action]'?actions:[];
+ document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):[];
  const window=new EventTarget();window.scrollTo=()=>{};
  const events=[],requests=[],saved=[];let timerId=0;
  const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:{getItem:()=>null,setItem(){}},confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
@@ -45,7 +44,7 @@ function fixture(){
  const context=vm.createContext(globals);
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nthis.testAPI={
   analyzeCurrent,selectRecord,renderAnalysis,
-  setup:(items,selected)=>{records=items;current=selected;apiKey='sk-local-test-only';autoAnalyze=true;ui.reviewAction.value=selected.actionType;ui.reviewActionDetail.value=selected.actionDetail;},
+  setup:(items,selected)=>{records=items;current=selected;apiKey='sk-local-test-only';autoAnalyze=true;},
   provider:fn=>{analyzeFrames=fn;}, extractor:fn=>{extractFrames=fn;},
   replaceHistory:items=>{records=items;},snapshot:()=>({current,records,analysisBusy}),
   save:fn=>{persistRecord=fn;}
@@ -89,11 +88,35 @@ test('first-jump analysis cannot inherit from itself or a future jump',async()=>
  assert.equal(current.trainingContext.previousFocus,null);assert.equal(current.analysis.analysis.followUp,null);
 });
 
-test('changing the target before analysis does not inherit the old target cue',async()=>{
- const previous=clip('first',1000,{analysis:report({instruction:'直飞的上次建议'})}),current=clip('second',2000),f=fixture();
- f.api.setup([current,previous],current);f.nodes.reviewAction.value='转体';f.nodes.reviewActionDetail.value='背转 180';
- await f.api.analyzeCurrent();assert.equal(f.requests[0].action,'转体 · 背转 180');assert.equal(f.requests[0].previousFocus,null);
- assert.equal(current.trainingContext.previousFocus,null);
+test('recognizing a different action starts a new focus without grading the previous action cue',async()=>{
+ const previous=clip('first',1000,{analysis:report({instruction:'直飞的上次训练重点'})}),current=clip('second',2000),f=fixture();
+ f.api.setup([current,previous],current);f.api.provider(async payload=>{f.requests.push(payload);return report({type:'转体',description:'本跳空中可见主动转体。',relation:'different',follow:null,instruction:'这一跳新的转体训练重点'});});
+ await f.api.analyzeCurrent();
+ assert.equal(f.requests[0].actionMode,'auto');assert.equal(f.requests[0].previousFocus.instruction,'直飞的上次训练重点');
+ assert.equal(current.actionMode,'auto');assert.equal(current.actionType,'转体');assert.equal(current.action,'转体');
+ const text=f.nodes.analysisResult.textContent;
+ assert.ok(text.includes('这一跳新的转体训练重点'));assert.ok(!text.includes('直飞的上次训练重点'));
+ assert.ok(/不同|变化|改变|切换/.test(text),'explain the changed action instead of grading its unrelated prior focus');
+ assert.equal(f.nodes.clipTitle.textContent,'转体');assert.ok(f.nodes.recognizedActionHint.textContent.includes('本跳空中可见主动转体。'));
+});
+
+test('analysis starts without a typed goal, automatically recognizes the action and removes stale manual goal fields',async()=>{
+ const current=clip('first',1000,{actionType:'',actionDetail:'旧的手动描述',focus:'旧的关注点'}),f=fixture();f.api.setup([current],current);
+ await f.api.analyzeCurrent();
+ assert.equal(f.requests[0].actionMode,'auto');assert.equal(Object.hasOwn(f.requests[0],'action'),false);
+ assert.equal(f.nodes.reviewAction,undefined);assert.equal(f.nodes.reviewActionDetail,undefined);assert.equal(f.nodes.focusInput,undefined);
+ assert.equal(current.actionMode,'auto');assert.equal(current.actionType,'直飞');assert.equal(current.action,'直飞');assert.equal(current.actionDetail,'');assert.equal(current.focus,'');
+ assert.equal(f.nodes.clipTitle.textContent,'直飞');assert.ok(f.nodes.recognizedActionHint.textContent.includes('本跳可见保持板身朝向前方。'));
+ assert.equal(f.saved[0].analysis.trainingGoalKey,f.saved[0].trainingContext.goalKey);
+});
+
+test('uncertain recognition is displayed honestly and preserves the previous training context',async()=>{
+ const previous=clip('first',1000,{analysis:report({instruction:'此前明确的训练重点'})}),current=clip('second',2000),f=fixture();f.api.setup([current,previous],current);
+ f.api.provider(async()=>report({type:'无法判断',description:'本跳无法确认动作类型。',relation:'uncertain',practiceActionType:'直飞',follow:{status:'uncertain',observation:'暂时无法确认上次动作是否完成。',time:null},instruction:'继续此前明确的训练重点'}));
+ await f.api.analyzeCurrent();
+ assert.equal(current.actionType,'无法判断');assert.equal(current.trainingContext.previousFocus.sourceId,'first');assert.equal(current.trainingContext.previousFocus.instruction,'此前明确的训练重点');
+ assert.equal(current.analysis.analysis.practiceActionType,'直飞');assert.equal(f.nodes.clipTitle.textContent,'无法判断');
+ assert.ok(f.nodes.recognizedActionHint.textContent.includes('本跳无法确认动作类型。'));assert.ok(f.nodes.analysisResult.textContent.includes('暂时无法判断'));
 });
 
 for(const outcome of ['failed','cancelled'])test(`${outcome} reanalysis preserves the saved report and its cue snapshot`,async()=>{
@@ -117,8 +140,8 @@ test('follow-up renders frozen cue and evidence as text between stages and the o
  for(const value of ['上次重点 '+marker,'上次检查 '+marker,'本次证据 '+marker])assert.ok(text.includes(value),value);
  assert.ok(text.indexOf('腾空可见表现')<text.indexOf('上次重点 '+marker));assert.ok(text.indexOf('本次证据 '+marker)<text.indexOf('总体分析'));
  assert.ok(!f.htmlWrites.some(value=>value.includes(marker)),'untrusted provider/cue text must not become HTML');
- for(const schemaVersion of [2,3]){
-  current.analysis=report({schemaVersion,instruction:'旧版仍可见的建议'});f.api.renderAnalysis();
+ for(const schemaVersion of [2,3,4]){
+  current.analysis=report({schemaVersion,instruction:'旧版仍可见的建议',follow:null});f.api.renderAnalysis();
   assert.ok(f.nodes.analysisResult.textContent.includes('旧版仍可见的建议'));
   assert.ok(!f.nodes.analysisResult.textContent.includes('上次重点 '+marker));
  }

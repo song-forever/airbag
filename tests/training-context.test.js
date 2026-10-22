@@ -91,3 +91,67 @@ test('ambiguous equal-timestamp goal changes reset instead of guessing order',()
  const current=record('next',30),a=analyzed('a',20),b=record('b',20,{actionType:'抓板'});
  assert.equal(getTrainingContext(current,[a,b]).previousFocus,null);assert.equal(getTrainingContext(current,[b,a]).previousFocus,null);
 });
+
+test('automatic recognition has a stable goal independent of the current unknown action fields',()=>{
+ const first=record('first',10,{actionMode:'auto',actionType:'无法判断',focus:'旧关注点'}),next=record('next',20,{actionMode:'auto',actionType:'转体',actionDetail:'180'});
+ assert.equal(goalKeyForRecord(first),JSON.stringify(['auto']));assert.equal(goalKeyForRecord(first),goalKeyForRecord(next));
+ assert.notEqual(goalKeyForRecord(first),goalKeyForRecord(record('manual',30)));
+});
+
+test('automatic mode uses the nearest analyzed cue across manual goal changes and unanalyzed attempts',()=>{
+ const straight=analyzed('straight',10),grab=analyzed('grab',20,{actionType:'抓板'}),unreviewed=record('unreviewed',30,{actionType:'转体'}),current=record('auto-next',40,{actionMode:'auto',actionType:'无法判断'});
+ grab.analysis.trainingGoalKey=goalKeyForRecord(grab);
+ const context=getTrainingContext(current,[straight,current,unreviewed,grab]);
+ assert.deepEqual(context.previousFocus,{sourceId:'grab',sourceCreatedAt:20,...cue,actionType:'抓板'});
+});
+
+test('automatic cue lineage prefers practice action type even when the last jump itself was uncertain',()=>{
+ const previous=analyzed('previous-auto',10,{actionMode:'auto',actionType:'无法判断'}),current=record('next-auto',20,{actionMode:'auto'});
+ previous.analysis.analysis.practiceActionType='转体抓板';previous.analysis.analysis.recognizedAction={type:'无法判断'};
+ previous.analysis.trainingGoalKey=goalKeyForRecord(previous);
+ assert.equal(getTrainingContext(current,[previous]).previousFocus.actionType,'转体抓板');
+ previous.analysis.analysis.practiceActionType='无法判断';previous.analysis.analysis.recognizedAction={type:'抓板'};
+ assert.equal(getTrainingContext(current,[previous]).previousFocus.actionType,'无法判断');
+});
+
+test('automatic cue type falls back to recognized action, known legacy action and finally unknown',()=>{
+ const previous=analyzed('previous',10,{actionMode:'auto',actionType:'自定义'}),current=record('next',20,{actionMode:'auto'});
+ previous.analysis.analysis.recognizedAction={type:'转体'};
+ assert.equal(getTrainingContext(current,[previous]).previousFocus.actionType,'转体');
+ delete previous.analysis.analysis.recognizedAction;previous.actionType='抓板';
+ assert.equal(getTrainingContext(current,[previous]).previousFocus.actionType,'抓板');
+ delete previous.actionType;previous.action='转体抓板';
+ assert.equal(getTrainingContext(current,[previous]).previousFocus.actionType,'转体抓板');
+ previous.action='自定义动作';
+ const unknown=getTrainingContext(current,[previous]).previousFocus;
+ assert.equal(unknown.actionType,'无法判断');assert.equal(unknown.instruction,cue.instruction);
+});
+
+test('automatic selection validates historical goal stamps against each source rather than the auto group',()=>{
+ const first=analyzed('valid-manual',10,{actionType:'抓板'}),stale=analyzed('stale',20,{actionType:'转体'}),current=record('next',30,{actionMode:'auto'});
+ first.analysis.trainingGoalKey=goalKeyForRecord(first);stale.analysis.trainingGoalKey=goalKeyForRecord({...stale,actionType:'直飞'});
+ assert.equal(getTrainingContext(current,[stale,first]).previousFocus.sourceId,'valid-manual');
+});
+
+test('automatic snapshots freeze cue action type after source reanalysis, deletion or current action inference',()=>{
+ const previous=analyzed('previous',10,{actionMode:'auto'}),current=record('next',20,{actionMode:'auto',actionType:'无法判断'});
+ previous.analysis.analysis.practiceActionType='抓板';current.trainingContext=getTrainingContext(current,[previous]);
+ previous.analysis.analysis.practiceActionType='转体';current.actionType='直飞';
+ const restored=getTrainingContext(current,[]);
+ assert.equal(restored.previousFocus.actionType,'抓板');assert.equal(restored.previousFocus.instruction,cue.instruction);
+ restored.previousFocus.actionType='转体';assert.equal(current.trainingContext.previousFocus.actionType,'抓板');
+});
+
+test('automatic first-report snapshots remain first and cannot inherit from self, peers or future jumps',()=>{
+ const current=analyzed('current',20,{actionMode:'auto'}),peer=analyzed('peer',20),future=analyzed('future',30);
+ assert.equal(getTrainingContext(current,[future,current,peer]).previousFocus,null);
+ current.trainingContext=getTrainingContext(current,[]);
+ assert.equal(getTrainingContext(current,[analyzed('late-old',10)]).previousFocus,null);
+});
+
+test('optional source action hints are whitelisted and malformed frozen hints are not trusted',()=>{
+ const previous=analyzed('previous',10),current=record('next',20,{actionMode:'auto'}),goalKey=goalKeyForRecord(current);
+ current.trainingContext={goalKey,previousFocus:{sourceId:'older',sourceCreatedAt:5,...cue,actionType:'编造动作',apiKey:'secret'}};
+ const recovered=getTrainingContext(current,[previous]);
+ assert.equal(recovered.previousFocus.sourceId,'previous');assert.equal(recovered.previousFocus.actionType,'直飞');assert.equal(JSON.stringify(recovered).includes('secret'),false);
+});

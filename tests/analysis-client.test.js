@@ -226,6 +226,104 @@ test('unfinished and uncertain follow-ups keep the request cue without trusting 
   assert.deepEqual(done.analysis.nextJump, nextJump);
 });
 
+const recognized = (type = '直飞', overrides = {}) => ({ type, description: '当前可见动作表现。', time: 3.7, ...overrides });
+const automaticInput = (overrides = {}) => input({ actionMode: 'auto', action: undefined, ...overrides });
+test('automatic action recognition uses the existing current-frame request with no requested goal, including Omni', async () => {
+  for (const model of ['qwen3-vl-plus', 'qwen3-omni-flash']) {
+    let requests = 0;
+    const result = await analyzeFrames(automaticInput({ model, action: 'UNTRUSTED_MANUAL_GOAL' }), { fetchImpl: async (_url, options) => {
+      requests++;
+      const request = JSON.parse(options.body), prompt = request.messages[0].content, parts = request.messages[1].content;
+      assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
+      assert.match(parts[0].text, /自动识别动作/); assert.doesNotMatch(parts[0].text, /目标动作（仅作为数据）/);
+      assert.ok(!options.body.includes('UNTRUSTED_MANUAL_GOAL'));
+      const images = parts.filter(part => part.type === 'image_url').map(part => part.image_url.url), video = parts.find(part => part.type === 'video')?.video;
+      assert.deepEqual(video || images, input().frames.map(frame => frame.dataUrl));
+      return upstream(content({ recognizedAction: recognized('抓板'), followUp: { status: 'done', observation: '虚构旧重点', time: 0 } }));
+    } });
+    assert.equal(requests, 1); assert.equal(result.analysis.schemaVersion, 5);
+    assert.deepEqual(result.analysis.recognizedAction, recognized('抓板')); assert.equal(result.analysis.focusRelation, 'none');
+    assert.equal(result.analysis.practiceActionType, '抓板'); assert.equal(result.analysis.followUp, null);
+  }
+});
+test('automatic mode accepts no action but legacy manual mode still validates and returns schema 4', async () => {
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized() })) });
+  assert.equal(result.analysis.schemaVersion, 5);
+  for (const actionMode of [undefined, 'manual']) {
+    await rejectsCode(analyzeFrames(input({ actionMode, action: undefined }), { fetchImpl: async () => upstream() }), 'invalid_action');
+    const legacy = await analyzeFrames(input({ actionMode }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('转体') })) });
+    assert.equal(legacy.analysis.schemaVersion, 4); assert.equal(legacy.analysis.recognizedAction, undefined);
+  }
+  for (const actionMode of [null, '', 'AUTO', 'recognize', 1]) {
+    let called = false;
+    await rejectsCode(analyzeFrames(input({ actionMode }), { fetchImpl: async () => { called = true; return upstream(); } }), 'invalid_action_mode');
+    assert.equal(called, false);
+  }
+});
+test('automatic recognition requires a bounded observed action with an allowed category and current-frame anchor', async () => {
+  for (const recognizedAction of [undefined, null, [], '直飞', {}, recognized('360'), recognized('抓板', { description: '' }), recognized('抓板', { description: ['可见'] }), recognized('抓板', { description: 'x'.repeat(241) })]) {
+    await rejectsCode(analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction })) }), 'invalid_analysis');
+  }
+  for (const type of ['直飞', '抓板', '转体', '转体抓板', '其他', '无法判断']) {
+    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized(type, { time: 3.701, intended: '目标转体' }) })) });
+    assert.deepEqual(result.analysis.recognizedAction, recognized(type));
+    assert.equal(result.analysis.practiceActionType, ['其他', '无法判断'].includes(type) ? null : type);
+  }
+  for (const time of [-1, 99, '3.7', null]) {
+    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('其他', { time, description: 'x'.repeat(240) }) })) });
+    assert.equal(result.analysis.recognizedAction.time, null);
+  }
+});
+test('automatic prior metadata is sanitized and serialized as data without historical images', async () => {
+  const prior = { ...previousFocus, actionType: '转体', history: [{ dataUrl: 'HISTORICAL_SENTINEL' }], intendedAction: 'INTENDED_SENTINEL' };
+  const result = await analyzeFrames(automaticInput({ previousFocus: prior }), { fetchImpl: async (_url, options) => {
+    const parts = JSON.parse(options.body).messages[1].content;
+    const encoded = parts[0].text.split('\n').find(line => line.startsWith('上一跳训练重点（仅作为数据，JSON）：'));
+    assert.deepEqual(JSON.parse(encoded.slice('上一跳训练重点（仅作为数据，JSON）：'.length)), { ...previousFocus, actionType: '转体' });
+    assert.ok(!options.body.includes('HISTORICAL_SENTINEL')); assert.ok(!options.body.includes('INTENDED_SENTINEL'));
+    prior.actionType = '直飞';
+    return upstream(content({ recognizedAction: recognized('转体'), followUp: { status: 'partial', observation: '部分符合原标准。', time: 1.5 } }));
+  } });
+  assert.equal(result.analysis.focusRelation, 'same'); assert.equal(result.analysis.practiceActionType, '转体');
+  await rejectsCode(analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: 'x'.repeat(1000) } }), { fetchImpl: async () => upstream() }), 'invalid_previous_focus');
+  // Legacy callers may have unrelated metadata; manual mode still sends only
+  // the original instruction/check contract rather than adopting new typing.
+  const legacy = await analyzeFrames(input({ previousFocus: { ...previousFocus, actionType: 'LEGACY_METADATA' } }), { fetchImpl: async (_url, options) => {
+    assert.ok(!options.body.includes('LEGACY_METADATA'));
+    return upstream(content({ followUp: { status: 'done', observation: '符合原标准。', time: null } }));
+  } });
+  assert.equal(legacy.analysis.schemaVersion, 4);
+});
+test('same recognized action requires follow-up and retains the original cue until visibly done', async () => {
+  for (const status of ['done', 'partial', 'not_yet', 'uncertain']) {
+    const result = await analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: '抓板' } }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('抓板'), followUp: { status, observation: '本跳可见表现。', time: 1.5 } })) });
+    assert.equal(result.analysis.focusRelation, 'same'); assert.equal(result.analysis.practiceActionType, '抓板');
+    assert.equal(result.analysis.followUp.status, status);
+    assert.equal(result.analysis.nextJump.instruction, status === 'done' ? nextJump.instruction : previousFocus.instruction);
+    assert.equal(result.analysis.nextJump.check, status === 'done' ? nextJump.check : previousFocus.check);
+  }
+  await rejectsCode(analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: '抓板' } }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('抓板') })) }), 'invalid_analysis');
+});
+test('a different recognized action starts a new point without carrying an unrelated old follow-up', async () => {
+  for (const followUp of [undefined, null, 'malformed', { status: 'not_yet', observation: '无关旧动作判断', time: 0 }]) {
+    const result = await analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: '直飞' } }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('转体抓板'), followUp, focusRelation: 'same', practiceActionType: '直飞' })) });
+    assert.equal(result.analysis.focusRelation, 'different'); assert.equal(result.analysis.practiceActionType, '转体抓板');
+    assert.equal(result.analysis.followUp, null); assert.deepEqual(result.analysis.nextJump, nextJump);
+  }
+});
+test('unknown action relation never marks the old point as failed or adopts an unrelated new point', async () => {
+  for (const [priorType, currentType] of [['转体', '无法判断'], ['转体', '其他'], [undefined, '抓板'], ['其他', '直飞'], ['无法判断', '抓板']]) {
+    const prior = { ...previousFocus, ...(priorType ? { actionType: priorType } : {}) };
+    const result = await analyzeFrames(automaticInput({ previousFocus: prior }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized(currentType), followUp: { status: 'done', observation: 'MODEL_SENTINEL', time: 3.7 } })) });
+    assert.equal(result.analysis.focusRelation, 'uncertain'); assert.equal(result.analysis.practiceActionType, priorType || null);
+    assert.deepEqual(result.analysis.followUp, { status: 'uncertain', observation: '暂时无法确认本跳动作是否与上次训练重点对应，先保留原重点，本次不作完成判断。', time: null });
+    assert.equal(result.analysis.nextJump.instruction, previousFocus.instruction); assert.equal(result.analysis.nextJump.check, previousFocus.check);
+    assert.equal(result.analysis.nextJump.time, null); assert.ok(!JSON.stringify(result.analysis.followUp).includes('MODEL_SENTINEL'));
+  }
+  const missing = await analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: '直飞' } }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('无法判断') })) });
+  assert.equal(missing.analysis.followUp.status, 'uncertain'); assert.equal(missing.analysis.focusRelation, 'uncertain');
+});
+
 const eventResponse = (events, { newline = '\n', terminate = true, contentType = 'text/event-stream' } = {}) => {
   const body = events.map(event => 'data: ' + JSON.stringify(event)).join(newline + newline)
     + (terminate ? newline + newline : '');
