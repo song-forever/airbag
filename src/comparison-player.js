@@ -1,4 +1,4 @@
-import {findComparisonRecord,getComparisonSegments} from './jump-comparison.js?v=0.10.0';
+import {findComparisonRecord,getComparisonSegments} from './jump-comparison.js?v=0.11.0';
 
 /** Owns only comparison playback; the main player remains usable when closed. */
 export class ComparisonPlayer {

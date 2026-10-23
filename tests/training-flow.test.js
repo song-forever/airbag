@@ -15,7 +15,7 @@ const phaseNames=['助滑','上台','起跳','腾空'];
 const frames=[0,.2,.4,.6].map(time=>({time,dataUrl:'data:image/jpeg;base64,/9j/2Q=='}));
 const followUp={status:'done',observation:'本跳能看到上一跳所选动作已保持。',time:.4};
 function report({schemaVersion=5,instruction='下一跳保持双手在身前',check='回看腾空时双手仍在身前',follow=followUp,type='直飞',description='本跳可见保持板身朝向前方。',relation=follow?'same':'none',practiceActionType=type}={}){
- return {model:'qwen3.7-plus',frameCount:4,usage:{},analysis:{schemaVersion,stages:phaseNames.map(phase=>({phase,analysis:phase+'可见表现',time:null})),nextJump:{instruction,reason:'这是本跳最明确且易于执行的动作。',check,time:null},...(schemaVersion>=4?{followUp:follow}:{}),...(schemaVersion===5?{recognizedAction:{type,description,time:.4},focusRelation:relation,practiceActionType}:{})}};
+ return {model:'qwen3.7-plus',frameCount:4,usage:{},analysis:{schemaVersion,stages:phaseNames.map(phase=>({phase,analysis:phase+'可见表现',time:null})),nextJump:{instruction,reason:'这是本跳最明确且易于执行的动作。',check,time:null},...(schemaVersion>=4?{followUp:follow}:{}),...(schemaVersion>=5?{recognizedAction:{type,description,time:.4},focusRelation:relation,practiceActionType}:{})}};
 }
 function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysis=null,actionMode='auto'}={}){
  const item={id,createdAt,actionMode,actionType,actionDetail,focus,action:actionType+(actionDetail?' · '+actionDetail:''),source:'camera',blob:new Blob(['clip'],{type:'video/mp4'}),duration:6,width:720,height:1280,trimStart:0,trimEnd:6,note:'本机测试',keyframes:[],analysis};
@@ -182,4 +182,15 @@ test('two-jump comparison opens locally, shares speed controls and resets both U
  await f.api.selectRecord(next);
  assert.equal(f.nodes.reviewVideo.playbackRate,1);assert.equal(f.nodes.comparePreviousVideo.playbackRate,1);assert.equal(f.speeds[2]['aria-pressed'],'true');
  assert.equal(f.nodes.comparePrevious.hidden,true);assert.equal(f.nodes.loopBtn.disabled,false);assert.equal(f.requests.length,0,'local comparison must not make a model request');
+});
+
+
+test('schema 6 reports render derived recognition evidence as text and preserve stage and overall analysis',async()=>{
+ const f=fixture(),current=clip('evidence',2000),a=report({schemaVersion:6,follow:null}),marker='<img src=x onerror=alert(1)>';
+ a.analysis.recognizedAction.features={rotation:{state:'no',evidence:[{time:.2,observation:'朝向稳定 '+marker},{time:.4,observation:'整体朝向仍稳定'}]},grab:{state:'no',evidence:[{time:.2,observation:'手与板分离'},{time:.4,observation:'手与板继续分离'}]}};
+ a.analysis.recognizedAction.evidenceIncomplete=false;f.api.setup([current],current);f.api.provider(async()=>a);await f.api.analyzeCurrent();
+ assert.equal(f.nodes.clipTitle.textContent,'直飞');assert.equal(f.nodes.actionEvidencePanel.hidden,false);assert.ok(f.nodes.actionEvidenceList.textContent.includes('朝向稳定 '+marker));assert.ok(!f.htmlWrites.some(value=>value.includes(marker)));
+ assert.ok(f.nodes.analysisResult.textContent.includes('腾空可见表现'));assert.ok(f.nodes.analysisResult.textContent.includes('总体分析'));
+ const evidenceButton=f.nodes.actionEvidenceList.children[0].children.find(child=>child.className==='time-link');evidenceButton.onclick();assert.equal(f.nodes.reviewVideo.currentTime,.2);
+ current.analysis=report({schemaVersion:5});await f.api.selectRecord(current);assert.equal(f.nodes.actionEvidencePanel.hidden,true);
 });

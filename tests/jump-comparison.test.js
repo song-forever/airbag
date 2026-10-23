@@ -55,7 +55,7 @@ test('legacy goals without observed recognition cannot identify the actual actio
 
 test('recognized action is sufficient across supported report versions regardless of stored goals',()=>{
  const current=action(record('current',20),'抓板');
- for(const schemaVersion of [2,3,4,5]){
+ for(const schemaVersion of [2,3,4,5,6]){
   const observed=record('observed',10,{actionMode:undefined,actionType:'转体',action:'直飞',analysis:{analysis:{schemaVersion,recognizedAction:{type:'抓板'}}}});
   assert.equal(findComparisonRecord(current,[observed]).id,'observed');
   assert.deepEqual(getComparisonSegments(current,observed).map(item=>item.id),['whole']);

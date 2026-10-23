@@ -6,7 +6,7 @@ const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value)
 
 function reportFor(record){
  const report=record?.analysis;
- if(!object(report)||!object(report.analysis)||![2,3,4,5].includes(report.analysis.schemaVersion))return null;
+ if(!object(report)||!object(report.analysis)||![2,3,4,5,6].includes(report.analysis.schemaVersion))return null;
  if(Object.hasOwn(report,'trainingGoalKey')&&report.trainingGoalKey!==goalKeyForRecord(record))return null;
  return report.analysis;
 }

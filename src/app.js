@@ -1,11 +1,11 @@
 import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
-import { ComparisonPlayer } from './comparison-player.js?v=0.10.0';
+import { ComparisonPlayer } from './comparison-player.js?v=0.11.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.9.0';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.11.0';
 import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
@@ -66,6 +66,22 @@ function updateRecognizedAction(record){
  const recognized=record.analysis?.analysis?.recognizedAction;
  ui.clipTitle.textContent=recognized?.type||record.actionType||'待识别动作';
  ui.recognizedActionHint.textContent=recognized?recognized.description:'分析时自动识别动作，无需选择或输入。';
+ ui.actionEvidenceList.replaceChildren();ui.actionEvidencePanel.hidden=!recognized?.features;
+ if(recognized?.features){
+  const labels={yes:'观察到',no:'未见相应表现',uncertain:'暂无法确认'};
+  const show=(label,feature)=>{
+   if(!feature)return;
+   const row=appendText(ui.actionEvidenceList,'div','','recognition-evidence');
+   appendText(row,'strong',label+'：'+(labels[feature.state]||'暂无法确认'));
+   if(!feature.evidence?.length)appendText(row,'p','本项暂不作确定判断。');
+   for(const evidence of feature.evidence||[]){
+    appendText(row,'p',evidence.observation);
+    const button=appendText(row,'button','回看 '+evidence.time.toFixed(2)+'s','time-link');button.type='button';button.onclick=()=>reviewAt(evidence.time);
+   }
+  };
+  show('转体',recognized.features.rotation);show('抓板',recognized.features.grab);
+  if(recognized.otherAction)show('其他动作',{state:'yes',evidence:recognized.otherAction.evidence});
+ }
 }
 function setView(view) {
  if(view!=='review')comparison.pause();
@@ -387,8 +403,8 @@ function renderAnalysis() {
  ui.analyzeBtn.textContent=data?'重新分析这一跳 ↗':'分析这一跳 ↗';
  if(!data)return;
  const a=data.analysis;
- if([2,3,4,5].includes(a?.schemaVersion)&&a.nextJump){
-  if([3,4,5].includes(a.schemaVersion)&&Array.isArray(a.stages)){
+ if([2,3,4,5,6].includes(a?.schemaVersion)&&a.nextJump){
+  if([3,4,5,6].includes(a.schemaVersion)&&Array.isArray(a.stages)){
    for(const stage of a.stages){
     const row=document.createElement('div');row.className='observation';const head=document.createElement('div');head.className='observation-head';
     appendText(head,'strong',stage.phase);

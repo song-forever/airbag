@@ -226,7 +226,12 @@ test('unfinished and uncertain follow-ups keep the request cue without trusting 
   assert.deepEqual(done.analysis.nextJump, nextJump);
 });
 
-const recognized = (type = '直飞', overrides = {}) => ({ type, description: '当前可见动作表现。', time: 3.7, ...overrides });
+const recognized = (type = '直飞', overrides = {}) => {
+ const evidence=observation=>[1.5,3.7].map(time=>({time,observation}));
+ const rotation=type==='无法判断'||type==='其他'?'uncertain':['转体','转体抓板'].includes(type)?'yes':'no';
+ const grab=type==='无法判断'||type==='其他'?'uncertain':['抓板','转体抓板'].includes(type)?'yes':'no';
+ return {rotation:{state:rotation,evidence:rotation==='uncertain'?[]:evidence(rotation==='yes'?'身体与雪板整体朝向发生变化。':'身体与雪板整体朝向保持稳定。')},grab:{state:grab,evidence:grab==='uncertain'?[]:evidence(grab==='yes'?'手与板建立抓握接触。':'手与雪板分离。')},otherAction:type==='其他'?{evidence:evidence('可见四个标准类别以外的其他动作。')}:null,...overrides};
+};
 const automaticInput = (overrides = {}) => input({ actionMode: 'auto', action: undefined, ...overrides });
 test('automatic action recognition uses the existing current-frame request with no requested goal, including Omni', async () => {
   for (const model of ['qwen3-vl-plus', 'qwen3-omni-flash']) {
@@ -234,21 +239,21 @@ test('automatic action recognition uses the existing current-frame request with 
     const result = await analyzeFrames(automaticInput({ model, action: 'UNTRUSTED_MANUAL_GOAL' }), { fetchImpl: async (_url, options) => {
       requests++;
       const request = JSON.parse(options.body), prompt = request.messages[0].content, parts = request.messages[1].content;
-      assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
+      assert.equal(request.max_tokens,2200);assert.doesNotThrow(()=>JSON.parse(prompt.split('只返回以下 JSON 对象，不要 Markdown 围栏：\n')[1].split('\n')[0]));assert.match(prompt, /至少两个不同时刻/);assert.match(prompt, /单帧侧身、摆臂、拧肩/);assert.match(prompt, /抓握接触/);assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
       assert.match(parts[0].text, /自动识别动作/); assert.doesNotMatch(parts[0].text, /目标动作（仅作为数据）/);
       assert.ok(!options.body.includes('UNTRUSTED_MANUAL_GOAL'));
       const images = parts.filter(part => part.type === 'image_url').map(part => part.image_url.url), video = parts.find(part => part.type === 'video')?.video;
       assert.deepEqual(video || images, input().frames.map(frame => frame.dataUrl));
       return upstream(content({ recognizedAction: recognized('抓板'), followUp: { status: 'done', observation: '虚构旧重点', time: 0 } }));
     } });
-    assert.equal(requests, 1); assert.equal(result.analysis.schemaVersion, 5);
-    assert.deepEqual(result.analysis.recognizedAction, recognized('抓板')); assert.equal(result.analysis.focusRelation, 'none');
+    assert.equal(requests, 1); assert.equal(result.analysis.schemaVersion, 6);
+    assert.equal(result.analysis.recognizedAction.type,'抓板');assert.equal(result.analysis.recognizedAction.features.rotation.state,'no');assert.equal(result.analysis.recognizedAction.features.grab.state,'yes'); assert.equal(result.analysis.focusRelation, 'none');
     assert.equal(result.analysis.practiceActionType, '抓板'); assert.equal(result.analysis.followUp, null);
   }
 });
 test('automatic mode accepts no action but legacy manual mode still validates and returns schema 4', async () => {
   const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized() })) });
-  assert.equal(result.analysis.schemaVersion, 5);
+  assert.equal(result.analysis.schemaVersion, 6);
   for (const actionMode of [undefined, 'manual']) {
     await rejectsCode(analyzeFrames(input({ actionMode, action: undefined }), { fetchImpl: async () => upstream() }), 'invalid_action');
     const legacy = await analyzeFrames(input({ actionMode }), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('转体') })) });
@@ -260,20 +265,33 @@ test('automatic mode accepts no action but legacy manual mode still validates an
     assert.equal(called, false);
   }
 });
-test('automatic recognition requires a bounded observed action with an allowed category and current-frame anchor', async () => {
-  for (const recognizedAction of [undefined, null, [], '直飞', {}, recognized('360'), recognized('抓板', { description: '' }), recognized('抓板', { description: ['可见'] }), recognized('抓板', { description: 'x'.repeat(241) })]) {
-    await rejectsCode(analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction })) }), 'invalid_analysis');
-  }
-  for (const type of ['直飞', '抓板', '转体', '转体抓板', '其他', '无法判断']) {
-    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized(type, { time: 3.701, intended: '目标转体' }) })) });
-    assert.deepEqual(result.analysis.recognizedAction, recognized(type));
-    assert.equal(result.analysis.practiceActionType, ['其他', '无法判断'].includes(type) ? null : type);
-  }
-  for (const time of [-1, 99, '3.7', null]) {
-    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized('其他', { time, description: 'x'.repeat(240) }) })) });
-    assert.equal(result.analysis.recognizedAction.time, null);
-  }
+test('automatic recognition derives supported categories from evidence and ignores model summary labels',async()=>{
+ for(const recognizedAction of [undefined,null,[],'直飞'])await rejectsCode(analyzeFrames(automaticInput(),{fetchImpl:async()=>upstream(content({recognizedAction}))}),'invalid_analysis');
+ for(const type of ['直飞','抓板','转体','转体抓板','其他','无法判断']){
+  const result=await analyzeFrames(automaticInput(),{fetchImpl:async()=>upstream(content({recognizedAction:recognized(type,{type:'转体',description:'不应直接显示的摘要',time:99})}))});
+  assert.equal(result.analysis.recognizedAction.type,type);
+  assert.ok(!JSON.stringify(result.analysis.recognizedAction).includes('不应直接显示的摘要'));
+  assert.equal(result.analysis.practiceActionType,['其他','无法判断'].includes(type)?null:type);
+  assert.ok(result.analysis.recognizedAction.time===null||input().frames.some(frame=>frame.time===result.analysis.recognizedAction.time));
+ }
 });
+
+test('missing or invalid evidence cannot promote a claimed rotation or replace a prior cue',async()=>{
+ for(const raw of [{},{type:'转体',description:'旧格式直接声称转体',time:3.7},recognized('转体',{rotation:{state:'yes',evidence:[{time:3.7,observation:'只有单帧不能证明转动'}]}}),recognized('转体',{rotation:{state:'yes',evidence:[{time:1.1,observation:'输入没有该帧'},{time:3.7,observation:'另一帧'}]}})]){
+  const result=await analyzeFrames(automaticInput({previousFocus:{...previousFocus,actionType:'直飞'}}),{fetchImpl:async()=>upstream(content({recognizedAction:raw,followUp:{status:'done',observation:'不应接受的完成结论',time:3.7},nextJump:{...nextJump,instruction:'不应采用的转体纠正'}}))});
+  assert.equal(result.analysis.recognizedAction.type,'无法判断');assert.equal(result.analysis.recognizedAction.evidenceIncomplete,true);
+  assert.equal(result.analysis.focusRelation,'uncertain');assert.equal(result.analysis.followUp.status,'uncertain');assert.equal(result.analysis.practiceActionType,'直飞');
+  assert.equal(result.analysis.nextJump.instruction,previousFocus.instruction);assert.equal(result.analysis.nextJump.check,previousFocus.check);
+ }
+ const first=await analyzeFrames(automaticInput(),{fetchImpl:async()=>upstream(content({recognizedAction:{type:'转体'},nextJump:{...nextJump,instruction:'不应采用的转体纠正'}}))});
+ assert.equal(first.analysis.recognizedAction.type,'无法判断');assert.equal(first.analysis.followUp,null);assert.ok(!JSON.stringify(first.analysis.nextJump).includes('不应采用'));
+});
+
+test('training continuity follows the derived action instead of a contradictory model label',async()=>{
+ const result=await analyzeFrames(automaticInput({previousFocus:{...previousFocus,actionType:'直飞'}}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('直飞',{type:'转体'}),followUp:{status:'partial',observation:'按原重点对照。',time:3.7}}))});
+ assert.equal(result.analysis.recognizedAction.type,'直飞');assert.equal(result.analysis.practiceActionType,'直飞');assert.equal(result.analysis.focusRelation,'same');assert.equal(result.analysis.nextJump.instruction,previousFocus.instruction);
+});
+
 test('automatic prior metadata is sanitized and serialized as data without historical images', async () => {
   const prior = { ...previousFocus, actionType: '转体', history: [{ dataUrl: 'HISTORICAL_SENTINEL' }], intendedAction: 'INTENDED_SENTINEL' };
   const result = await analyzeFrames(automaticInput({ previousFocus: prior }), { fetchImpl: async (_url, options) => {
