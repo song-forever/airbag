@@ -1,5 +1,6 @@
 import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
+import { ComparisonPlayer } from './comparison-player.js?v=0.10.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
@@ -10,6 +11,7 @@ import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
+const comparison = new ComparisonPlayer({elements:ui,createElement:tag=>document.createElement(tag)});
 let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let detectionActive=false;
@@ -66,6 +68,7 @@ function updateRecognizedAction(record){
  ui.recognizedActionHint.textContent=recognized?recognized.description:'分析时自动识别动作，无需选择或输入。';
 }
 function setView(view) {
+ if(view!=='review')comparison.pause();
  ui.captureView.hidden=view!=='capture'; ui.reviewView.hidden=view!=='review';
  ui.captureTab.classList.toggle('active',view==='capture'); ui.reviewTab.classList.toggle('active',view==='review');
  if(view==='review') renderHistory();
@@ -345,8 +348,8 @@ async function importVideo(file) {
 async function selectRecord(record,{internal=false}={}) {
  if(armed||(!internal&&(processing||finishing))){toast('请先完成当前拍摄或保存。');return;}
  if(analysisBusy){toast('请先等待或取消当前分析，再切换视频。');return;}
- current=record;if(currentUrl)URL.revokeObjectURL(currentUrl);currentUrl=URL.createObjectURL(record.blob);
- ui.reviewVideo.src=currentUrl;ui.reviewVideo.playbackRate=.5;ui.reviewVideo.loop=false;
+ comparison.close();current=record;if(currentUrl)URL.revokeObjectURL(currentUrl);currentUrl=URL.createObjectURL(record.blob);
+ ui.reviewVideo.src=currentUrl;setReviewSpeed(1);ui.reviewVideo.loop=false;
  ui.reviewVideo.onloadedmetadata=()=>{ui.reviewVideo.currentTime=record.trimStart;};
  ui.reviewEmpty.hidden=true;ui.reviewContent.hidden=false;
  updateRecognizedAction(record);ui.clipSource.textContent=(record.source==='camera'?'现场拍摄':'本地导入')+' / '+new Date(record.createdAt).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
@@ -368,15 +371,17 @@ function renderHistory() {
 }
 let loopEnabled=true;
 ui.reviewVideo.addEventListener('timeupdate',()=>{
- if(!current)return;
+ if(!current||comparison.active)return;
  if(!ui.reviewVideo.paused&&ui.reviewVideo.currentTime>=current.trimEnd-.05){
   if(loopEnabled){ui.reviewVideo.currentTime=current.trimStart;if(!ui.reviewVideo.paused)ui.reviewVideo.play().catch(()=>{});}
   else ui.reviewVideo.pause();
  }
 });
-ui.reviewVideo.addEventListener('ended',()=>{if(current&&loopEnabled){ui.reviewVideo.currentTime=current.trimStart;ui.reviewVideo.play().catch(()=>{});}});
+ui.reviewVideo.addEventListener('ended',()=>{if(current&&!comparison.active&&loopEnabled){ui.reviewVideo.currentTime=current.trimStart;ui.reviewVideo.play().catch(()=>{});}});
+function reviewAt(time){comparison.close();ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(time,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();}
 function appendText(parent,tag,text,className=''){const el=document.createElement(tag);el.textContent=typeof text==='string'?text:JSON.stringify(text);if(className)el.className=className;parent.append(el);return el;}
 function renderAnalysis() {
+ comparison.render(current,records);
  const result=ui.analysisResult;result.replaceChildren();
  const data=current?.analysis;result.hidden=!data;ui.analysisIdle.hidden=!!data;ui.exportReportBtn.disabled=!data;
  ui.analyzeBtn.textContent=data?'重新分析这一跳 ↗':'分析这一跳 ↗';
@@ -387,7 +392,7 @@ function renderAnalysis() {
    for(const stage of a.stages){
     const row=document.createElement('div');row.className='observation';const head=document.createElement('div');head.className='observation-head';
     appendText(head,'strong',stage.phase);
-    const t=stage.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(head,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
+    const t=stage.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(head,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>reviewAt(t);}
     row.append(head);appendText(row,'p',stage.analysis);result.append(row);
    }
   }
@@ -401,19 +406,19 @@ function renderAnalysis() {
    appendText(panel,'strong','这一跳：'+followUpLabels[a.followUp.status],'followup-status '+a.followUp.status);
    appendText(panel,'p',a.followUp.observation);
    const t=a.followUp.time;
-   if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(panel,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
+   if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(panel,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>reviewAt(t);}
    result.append(panel);
   }
   appendText(result,'h3','总体分析');
   const next=a.nextJump,box=document.createElement('div');box.className='focus-box';
   appendText(box,'small','下一跳，只做这一件事');appendText(box,'p',next.instruction);result.append(box);
   appendText(result,'p',next.reason);
-  const t=next.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(result,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(t,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();};}
+  const t=next.time;if(typeof t==='number'&&Number.isFinite(t)){const button=appendText(result,'button','回看 '+t.toFixed(2)+'s','time-link');button.onclick=()=>reviewAt(t);}
   appendText(result,'p','回来检查：'+next.check);
  }else{
   appendText(result,'p','这是一份旧版报告，重新分析即可生成下一跳的单点建议。');
  }
- if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>{ui.reviewVideo.currentTime=current.trimStart+frame.time;ui.reviewVideo.pause();};strip.append(btn);}result.append(strip);}
+ if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>reviewAt(frame.time);strip.append(btn);}result.append(strip);}
  const u=data.usage||{};appendText(result,'div',data.model+(data.frameCount?' · '+data.frameCount+' 张画面':'')+'\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
 }
 async function findContentStart(video,start,end,signal) {
@@ -477,6 +482,7 @@ async function analyzeCurrent() {
  if(!apiKey){showSettings();toast('先填写自己的百炼模型 Key，再点击分析。');return;}
  if(!autoAnalyze){const yes=confirm('本次将把抽取画面直接发送至阿里云百炼模型，并产生 API 费用。是否继续？');if(!yes)return;}
  const record=current,run=++analysisRun;analysisController=new AbortController();analysisBusy=true;
+ comparison.close();ui.compareSection.hidden=true;
  const trainingContext=getTrainingContext({...record,actionMode:'auto'},records);
  const beforeExtraction={trimStart:record.trimStart,trimEnd:record.trimEnd,contentStart:record.contentStart,contentStartConfirmed:record.contentStartConfirmed};
  ui.analysisProgress.hidden=false;ui.analysisIdle.hidden=true;ui.analysisResult.hidden=true;ui.analysisError.hidden=true;ui.analyzeBtn.hidden=true;ui.analysisMeter.value=0;ui.progressTitle.textContent='正在准备画面';ui.armBtn.disabled=true;ui.importBtn.disabled=true;ui.nextJumpBtn.disabled=true;ui.deleteClipBtn.disabled=true;ui.applyTrimBtn.disabled=true;
@@ -491,7 +497,7 @@ async function analyzeCurrent() {
  }catch(err){
   if(run===analysisRun){Object.assign(record,beforeExtraction);ui.trimStart.value=record.trimStart.toFixed(1);ui.trimEnd.value=record.trimEnd.toFixed(1);ui.trimLabel.textContent=record.trimStart.toFixed(1)+'–'+record.trimEnd.toFixed(1)+' 秒';ui.analysisError.hidden=false;ui.analysisError.textContent=err.name==='AbortError'?'分析已取消或请求超时，视频仍保存在本机。':err.message;ui.analysisIdle.hidden=!!record.analysis;if(record.analysis)renderAnalysis();}
  }finally{
-  clearTimeout(timer);if(run===analysisRun){analysisBusy=false;analysisController=null;ui.analysisProgress.hidden=true;ui.analyzeBtn.hidden=false;ui.armBtn.disabled=false;ui.importBtn.disabled=false;ui.nextJumpBtn.disabled=false;ui.deleteClipBtn.disabled=false;ui.applyTrimBtn.disabled=false;}
+  clearTimeout(timer);if(run===analysisRun){analysisBusy=false;analysisController=null;ui.analysisProgress.hidden=true;ui.analyzeBtn.hidden=false;ui.armBtn.disabled=false;ui.importBtn.disabled=false;ui.nextJumpBtn.disabled=false;ui.deleteClipBtn.disabled=false;ui.applyTrimBtn.disabled=false;comparison.render(record,records);}
  }
 }
 function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;a.rel='noopener';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),300000);}
@@ -520,8 +526,12 @@ ui.settingsForm.onsubmit=e=>{
  toast(apiKey?'本次设置已保存。':'本地回放模式，无需百炼模型 Key。');
 };
 ui.clearKeyBtn.onclick=()=>{apiKey='';autoAnalyze=false;ui.apiKeyInput.value='';ui.autoAnalyzeInput.checked=false;toast('密钥已清除，自动分析已关闭。');};
-document.querySelectorAll('[data-speed]').forEach(btn=>btn.onclick=()=>{ui.reviewVideo.playbackRate=Number(btn.dataset.speed);document.querySelectorAll('[data-speed]').forEach(b=>b.classList.toggle('selected',b===btn));});
-function stepFrame(delta){if(!current)return;ui.reviewVideo.pause();ui.reviewVideo.currentTime=Math.min(current.trimEnd-.01,Math.max(current.trimStart,ui.reviewVideo.currentTime+delta/60));}
+function setReviewSpeed(speed){
+ ui.reviewVideo.playbackRate=speed;comparison.setPlaybackRate(speed);
+ document.querySelectorAll('[data-speed]').forEach(button=>{const selected=Number(button.dataset.speed)===speed;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));});
+}
+document.querySelectorAll('[data-speed]').forEach(btn=>btn.onclick=()=>setReviewSpeed(Number(btn.dataset.speed)));
+function stepFrame(delta){if(!current)return;comparison.pause();ui.reviewVideo.pause();ui.reviewVideo.currentTime=Math.min(current.trimEnd-.01,Math.max(current.trimStart,ui.reviewVideo.currentTime+delta/60));}
 ui.prevFrameBtn.onclick=()=>stepFrame(-1);ui.nextFrameBtn.onclick=()=>stepFrame(1);
 ui.loopBtn.onclick=()=>{loopEnabled=!loopEnabled;ui.loopBtn.setAttribute('aria-pressed',String(loopEnabled));ui.loopBtn.classList.toggle('selected',loopEnabled);};ui.loopBtn.classList.add('selected');
 ui.nextJumpBtn.onclick=()=>{setView('capture');window.scrollTo({top:0,behavior:'smooth'});};
@@ -548,13 +558,13 @@ ui.shareVideoBtn.onclick=async()=>{
 ui.exportReportBtn.onclick=()=>{if(!current?.analysis)return;download(new Blob([JSON.stringify({createdAt:new Date(current.createdAt).toISOString(),action:current.action,range:{start:current.trimStart,end:current.trimEnd},...current.analysis,trainingContext:current.trainingContext||null},null,2)],{type:'application/json'}),'跃练-动作分析.json');};
 ui.deleteClipBtn.onclick=async()=>{
  if(!current||analysisBusy)return;if(!confirm('删除这一跳在当前浏览器中的视频和分析？'))return;
- const id=current.id;try{await dbOp('readwrite',s=>s.delete(id));}catch{toast('本地存储不可用，已清除当前页面中的记录。');}
+ comparison.close();const id=current.id;try{await dbOp('readwrite',s=>s.delete(id));}catch{toast('本地存储不可用，已清除当前页面中的记录。');}
  records=records.filter(r=>r.id!==id);current=null;if(currentUrl){URL.revokeObjectURL(currentUrl);currentUrl=null;}ui.reviewVideo.removeAttribute('src');ui.reviewVideo.load();
  if(records.length)await selectRecord(records[0]);else{ui.reviewContent.hidden=true;ui.reviewEmpty.hidden=false;ui.reviewCount.textContent='0';}
  renderHistory();
 };
-document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');else closeCamera();}else if(keepScreenAwake)keepAwake();});
-window.addEventListener('pagehide',()=>{apiKey='';releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){comparison.pause();releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');else closeCamera();}else if(keepScreenAwake)keepAwake();});
+window.addEventListener('pagehide',()=>{comparison.close();apiKey='';releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
 window.addEventListener('pageshow',()=>{if(keepScreenAwake&&!document.hidden)keepAwake();});
 window.addEventListener('beforeunload',event=>{if(armed||analysisBusy){event.preventDefault();event.returnValue='';}});
 window.addEventListener('unhandledrejection',event=>{console.warn('An operation could not complete.');});

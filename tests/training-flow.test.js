@@ -27,7 +27,7 @@ async function settleUntil(predicate){for(let i=0;i<60&&!predicate();i++)await P
 function fixture(){
  const htmlWrites=[];
  class Element extends EventTarget{
-  constructor(id=''){super();this.id=id;this.children=[];this._text='';this.hidden=false;this.disabled=false;this.value='';this.dataset={};this.style={};this.checked=false;this.paused=true;this.classList={add(){},remove(){},toggle(){}};}
+  constructor(id=''){super();this.id=id;this.children=[];this._text='';this.hidden=false;this.disabled=false;this.value='';this.dataset={};this.style={};this.checked=false;this.paused=true;this.readyState=2;this.seeking=false;this.classList={add(){},remove(){},toggle(){}};}
   set textContent(value){this._text=String(value);this.children=[];}get textContent(){return this._text+this.children.map(child=>typeof child==='string'?child:child.textContent).join('');}
   set innerHTML(value){htmlWrites.push(String(value));this._text='';this.children=[];}get innerHTML(){return '';}
   append(...children){this.children.push(...children);}prepend(...children){this.children.unshift(...children);}replaceChildren(...children){this._text='';this.children=children;}
@@ -36,7 +36,8 @@ function fixture(){
  }
  const nodes=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
  const document=new EventTarget();document.hidden=false;document.body=new Element();document.getElementById=id=>nodes[id];document.createElement=tag=>new Element(tag);
- document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):[];
+ const speeds=[.25,.5,1].map(speed=>{const button=new Element();button.dataset.speed=String(speed);return button;});
+ document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-speed]'?speeds:[];
  const window=new EventTarget();window.scrollTo=()=>{};
  const events=[],requests=[],saved=[];let timerId=0;
  const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:{getItem:()=>null,setItem(){}},confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
@@ -53,7 +54,7 @@ function fixture(){
  api.extractor(async()=>{events.push('extract');return frames;});
  api.provider(async payload=>{events.push('provider');requests.push(payload);return report({follow:payload.previousFocus?followUp:null});});
  api.save(async record=>{events.push('persist');saved.push(structuredClone(record));return true;});
- return {api,nodes,events,requests,saved,htmlWrites};
+ return {api,nodes,speeds,events,requests,saved,htmlWrites};
 }
 
 test('the next jump sends one prior cue selected once before extraction, then saves its successful snapshot',async()=>{
@@ -162,4 +163,23 @@ test('failed analysis rolls back provisional automatic trimming and retains the 
  assert.equal(f.nodes.trimStart.value,'0.0');assert.equal(f.nodes.trimEnd.value,'6.0');assert.equal(f.nodes.trimLabel.textContent,'0.0–6.0 秒');
  assert.equal(current.analysis,oldReport);assert.equal(current.trainingContext,oldContext);assert.equal(current.keyframes,oldKeyframes);
  assert.equal(f.saved.length,0);assert.ok(f.nodes.analysisResult.textContent.includes('原来的下一跳建议'));
+});
+
+
+test('two-jump comparison opens locally, shares speed controls and resets both UI and playback to 1x on another selection',async()=>{
+ const previous=clip('previous',1000,{analysis:report({follow:null})}),current=clip('current',2000,{analysis:report()}),next=clip('next',3000,{analysis:report()}),f=fixture();
+ current.trainingContext={previousFocus:{sourceId:previous.id,instruction:'这一跳对应的旧重点'}};
+ previous.analysis.analysis.stages.forEach((stage,index)=>stage.time=index+.5);
+ current.analysis.analysis.stages.forEach((stage,index)=>stage.time=index+1);
+ f.api.setup([next,current,previous],current);await f.api.selectRecord(current);
+ assert.equal(f.nodes.reviewVideo.playbackRate,1);assert.equal(f.speeds[2]['aria-pressed'],'true');assert.equal(f.speeds[1]['aria-pressed'],'false');
+ assert.equal(f.nodes.compareToggleBtn.disabled,false);f.nodes.compareToggleBtn.onclick();
+ assert.equal(f.nodes.comparePrevious.hidden,false);assert.equal(f.nodes.compareControls.hidden,false);assert.equal(f.nodes.loopBtn.disabled,true);
+ assert.ok(f.nodes.compareCue.textContent.includes('这一跳对应的旧重点'));
+ const takeoff=f.nodes.compareStages.children.find(button=>button.textContent==='起跳');takeoff.onclick();
+ assert.ok(f.nodes.compareHint.textContent.includes('参考点'));assert.equal(f.nodes.reviewVideo.currentTime,2.2);assert.equal(f.nodes.comparePreviousVideo.currentTime,1.7);
+ f.speeds[1].onclick();assert.equal(f.nodes.reviewVideo.playbackRate,.5);assert.equal(f.nodes.comparePreviousVideo.playbackRate,.5);
+ await f.api.selectRecord(next);
+ assert.equal(f.nodes.reviewVideo.playbackRate,1);assert.equal(f.nodes.comparePreviousVideo.playbackRate,1);assert.equal(f.speeds[2]['aria-pressed'],'true');
+ assert.equal(f.nodes.comparePrevious.hidden,true);assert.equal(f.nodes.loopBtn.disabled,false);assert.equal(f.requests.length,0,'local comparison must not make a model request');
 });
