@@ -1,12 +1,11 @@
-import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
+import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
-import { ComparisonPlayer } from './comparison-player.js?v=0.11.0';
+import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.11.0';
-import { getFrameTimes } from './frame-sampling.js?v=0.5.4';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
 const $ = (id) => document.getElementById(id);
@@ -14,6 +13,7 @@ const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [
 const comparison = new ComparisonPlayer({elements:ui,createElement:tag=>document.createElement(tag)});
 let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
+let analysisDetector=null,analysisDetectorPromise=null;
 let detectionActive=false;
 let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
@@ -199,15 +199,22 @@ function closeCamera() {
  const ctx=ui.trackingCanvas.getContext('2d');ctx.clearRect(0,0,ui.trackingCanvas.width,ui.trackingCanvas.height);
  ui.stopDetectionBtn.disabled=true;status('摄像头已关闭');ui.cameraHint.textContent='准备好后，点击下方按钮';ui.recordClock.textContent='00:00';
 }
+async function createPersonDetector(delegate) {
+ const {FilesetResolver,ObjectDetector}=await import(new URL('./vision/vision_bundle.mjs',import.meta.url).href);
+ const fileset=await FilesetResolver.forVisionTasks(new URL('./vision/wasm',import.meta.url).href);
+ return ObjectDetector.createFromOptions(fileset,{baseOptions:{modelAssetPath:new URL('./vision/model.tflite',import.meta.url).href,delegate},runningMode:'VIDEO',scoreThreshold:.38,maxResults:8,categoryAllowlist:['person']});
+}
+async function loadAnalysisDetector(){
+ if(analysisDetector)return analysisDetector;
+ if(!analysisDetectorPromise)analysisDetectorPromise=createPersonDetector('CPU').then(value=>{analysisDetector=value;return value;}).catch(error=>{analysisDetectorPromise=null;throw error;});
+ return analysisDetectorPromise;
+}
 async function loadDetector() {
  if(detector)return detector;
  if(detectorPromise)return detectorPromise;
  detectorPromise=(async()=>{
   status('首次准备：正在加载本地人物检测资源…');
-  const {FilesetResolver,ObjectDetector}=await import(new URL('./vision/vision_bundle.mjs',import.meta.url).href);
-  const fileset=await FilesetResolver.forVisionTasks(new URL('./vision/wasm',import.meta.url).href);
-  const options={baseOptions:{modelAssetPath:new URL('./vision/model.tflite',import.meta.url).href,delegate:'GPU'},runningMode:'VIDEO',scoreThreshold:.38,maxResults:8,categoryAllowlist:['person']};
-  try{detector=await ObjectDetector.createFromOptions(fileset,options);}catch{options.baseOptions.delegate='CPU';detector=await ObjectDetector.createFromOptions(fileset,options);}
+  try{detector=await createPersonDetector('GPU');}catch{detector=await createPersonDetector('CPU');}
   return detector;
  })();
  try{return await detectorPromise;}catch(err){detectorPromise=null;throw new Error('人物检测资源未能加载。请检查网络后重试；也可以先导入视频复盘。');}
@@ -437,17 +444,20 @@ function renderAnalysis() {
  if(current.keyframes?.length){const strip=document.createElement('div');strip.className='keyframes';for(const frame of current.keyframes){const btn=document.createElement('button');btn.className='keyframe';const img=document.createElement('img');img.src=frame.dataUrl;img.alt=frame.time.toFixed(1)+'秒画面';appendText(btn,'span',frame.time.toFixed(1)+'s');btn.prepend(img);btn.onclick=()=>reviewAt(frame.time);strip.append(btn);}result.append(strip);}
  const u=data.usage||{};appendText(result,'div',data.model+(data.frameCount?' · '+data.frameCount+' 张画面':'')+'\n'+(u.total_tokens?u.total_tokens.toLocaleString()+' Token · ':'')+(Number.isFinite(data.estimatedCostCny)?'标价估算 ¥'+data.estimatedCostCny.toFixed(4)+'（免费额度抵扣前）':'未配置此模型单价，费用以百炼账单为准'),'usage');
 }
-async function findContentStart(video,start,end,signal) {
- let model=detector;
+async function prepareAnalysisDetector(signal) {
+ let model=analysisDetector;
  if(!model){
   let timer,onAbort;
   try{
    if(signal.aborted)throw new DOMException('Aborted','AbortError');
-   model=await Promise.race([loadDetector(),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),8000);}),new Promise((_,reject)=>{onAbort=()=>reject(new DOMException('Aborted','AbortError'));signal.addEventListener('abort',onAbort,{once:true});})]);
+   model=await Promise.race([loadAnalysisDetector(),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),8000);}),new Promise((_,reject)=>{onAbort=()=>reject(new DOMException('Aborted','AbortError'));signal.addEventListener('abort',onAbort,{once:true});})]);
   }catch(error){if(error.name==='AbortError')throw error;return null;}
   finally{clearTimeout(timer);if(onAbort)signal.removeEventListener('abort',onAbort);}
-  if(!model)return null;
  }
+ return model||null;
+}
+async function findContentStart(video,start,end,signal,model=analysisDetector) {
+ if(!model)return null;
  const hasPerson=async time=>{
   if(signal.aborted)throw new DOMException('Aborted','AbortError');
   await seekVideo(video,time,signal);
@@ -468,29 +478,27 @@ async function findContentStart(video,start,end,signal) {
 async function extractFrames(record,signal) {
  let start=record.trimStart;const end=record.trimEnd;let duration=end-start;
  if(duration<0.5||duration>60)throw new Error('请选择 0.5 至 60 秒的片段。');
- const reader=await openVideoReader(record.blob,{signal}),v=reader.video;let frames=[];
+ const reader=await openVideoReader(record.blob,{signal}),v=reader.video;
  try {
+  const localDetector=await prepareAnalysisDetector(signal);
   if(!record.contentStartConfirmed){
-   const contentStart=await findContentStart(v,start,end,signal);
+   const contentStart=await findContentStart(v,start,end,signal,localDetector);
    if(typeof contentStart==='number'&&contentStart>start+.05&&end-contentStart>=.5){
     start=contentStart;duration=end-start;record.trimStart=start;record.contentStart=start;
     ui.trimStart.value=start.toFixed(1);ui.trimLabel.textContent=start.toFixed(1)+'–'+end.toFixed(1)+' 秒';
    }
    record.contentStartConfirmed=typeof contentStart==='number';
   }
-  const times=getFrameTimes(duration),count=times.length,c=document.createElement('canvas'),scale=Math.min(1,960/Math.max(v.videoWidth,v.videoHeight));
-  c.width=Math.max(1,Math.round(v.videoWidth*scale));c.height=Math.max(1,Math.round(v.videoHeight*scale));const ctx=c.getContext('2d',{alpha:false});
-  // Leave room for JSON, prompts and timestamps below the endpoint's 16 MiB limit.
-  const frameBudget=getFrameByteBudget({frameCount:count,maxBodyBytes:MAX_BODY_BYTES,maxFrameBytes:MAX_FRAME_BYTES});
-  for(let i=0;i<count;i++){
-   if(signal.aborted)throw new DOMException('Aborted','AbortError');
-   const relative=times[i];await seekVideo(v,start+relative,signal);
-   ctx.drawImage(v,0,0,c.width,c.height);
-   const dataUrl=await encodeFrame(c,{maxBytes:frameBudget,createCanvas:()=>document.createElement('canvas'),signal});
-   frames.push({time:relative,dataUrl});
-   ui.analysisMeter.value=Math.round((i+1)/count*55);ui.progressDetail.textContent='正在抽取画面 '+(i+1)+' / '+count+'，原片不上传。';await sleep(0);
-  }
-  return frames;
+  return await prepareAnalysisFrames(v,{start,end,signal,seek:seekVideo,maxBodyBytes:MAX_BODY_BYTES,maxFrameBytes:MAX_FRAME_BYTES,
+   detectPersons:localDetector?video=>{
+    const result=localDetector.detectForVideo(video,performance.now());
+    return (result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
+   }:undefined,
+   onProgress:({phase,completed,total})=>{
+    const labels={scout:'正在定位重点区间',locate:'正在定位人物范围',encode:'正在抽取与裁剪画面'};
+    ui.progressTitle.textContent=labels[phase];ui.progressDetail.textContent=completed+' / '+total+' · 在本机处理，原片不上传。';
+    const ranges={scout:[0,15],locate:[15,20],encode:[35,20]},[base,span]=ranges[phase];ui.analysisMeter.value=Math.round(base+span*completed/total);
+   }});
  }finally{reader.dispose();}
 }
 async function analyzeCurrent() {
@@ -504,9 +512,10 @@ async function analyzeCurrent() {
  ui.analysisProgress.hidden=false;ui.analysisIdle.hidden=true;ui.analysisResult.hidden=true;ui.analysisError.hidden=true;ui.analyzeBtn.hidden=true;ui.analysisMeter.value=0;ui.progressTitle.textContent='正在准备画面';ui.armBtn.disabled=true;ui.importBtn.disabled=true;ui.nextJumpBtn.disabled=true;ui.deleteClipBtn.disabled=true;ui.applyTrimBtn.disabled=true;
  let timer=null;
  try {
-  const frames=await extractFrames(record,analysisController.signal);
+  const prepared=await extractFrames(record,analysisController.signal),frames=prepared.frames;
   ui.progressTitle.textContent='正在识别动作并复盘';ui.progressDetail.textContent='自动识别动作，分析助滑、起跳与腾空。可先慢放回看。';ui.analysisMeter.value=65;
-  const data=await analyzeFrames({apiKey,model,frames,actionMode:'auto',duration:record.trimEnd-record.trimStart,previousFocus:trainingContext.previousFocus},{signal:analysisController.signal});
+  const data=await analyzeFrames({apiKey,model,frames,samplingMetadata:prepared.samplingMetadata,actionMode:'auto',duration:record.trimEnd-record.trimStart,previousFocus:trainingContext.previousFocus},{signal:analysisController.signal});
+  data.preparation=prepared.preparation;
   if(run!==analysisRun)return;
   data.trainingGoalKey=trainingContext.goalKey;record.trainingContext=trainingContext;record.analysis=data;record.actionMode='auto';record.actionType=data.analysis.recognizedAction?.type||'无法判断';record.action=record.actionType;record.actionDetail='';record.focus='';record.keyframes=Array.from({length:Math.min(8,frames.length)},(_,i)=>frames[Math.round(i*(frames.length-1)/(Math.min(8,frames.length)-1))]);await persistRecord(record);
   ui.analysisMeter.value=100;updateRecognizedAction(record);renderAnalysis();renderHistory();toast('这一跳的分析已完成。');

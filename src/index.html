@@ -10,7 +10,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <title>跃练 · 每一跳，都看得见</title>
-<link rel="stylesheet" href="./style.css?v=0.11.0">
+<link rel="stylesheet" href="./style.css?v=0.12.0">
 </head>
 <body>
 <div class="app-shell">
@@ -69,10 +69,10 @@
 <div class="history-heading"><h3>逐跳记录 <span id="historyTotal"></span></h3><span>保存在这台设备的浏览器中</span></div><div class="history-list" id="historyList"></div>
 </div></section>
 </main>
-<footer class="site-footer"><span>跃练 <span class="muted">/ 每一跳，都有下一步。</span></span><span>EARLY ACCESS · 0.11.0</span></footer>
+<footer class="site-footer"><span>跃练 <span class="muted">/ 每一跳，都有下一步。</span></span><span>EARLY ACCESS · 0.12.0</span></footer>
 </div>
 <dialog id="settingsDialog"><form id="settingsForm"><div class="dialog-heading"><div><p class="eyebrow">ANALYSIS SETTINGS</p><h2>选择分析模型</h2></div><button class="icon-button" type="button" data-close="settingsDialog" aria-label="关闭">×</button></div><p class="dialog-copy">使用阿里云百炼北京地域的 API Key。密钥只保留在当前页面内存中，刷新或关闭后需要重新填写。</p><label for="apiKeyInput">百炼 API Key</label><input type="password" id="apiKeyInput" autocomplete="off" spellcheck="false" placeholder="sk-… 或 st-…" maxlength="4096"><p class="micro-note">网页直接连接阿里云，不经过中转服务。建议测试时使用临时 Key；密钥不会保存到历史记录。</p><label for="modelSelect">分析模型</label><select id="modelSelect" aria-describedby="modelHint modelCatalogInfo"><option value="qwen3.7-plus">qwen3.7-plus · 推荐</option></select><p class="micro-note" id="modelCatalogInfo"></p><p class="micro-note" id="modelHint"></p><p class="inline-error" id="modelValidation" role="alert" hidden></p><p class="micro-note">列表来自你提供的免费额度清单，当前余额和有效期仍以百炼控制台为准。请保留对应模型的“免费额度用完即停”设置。</p><label class="check-label"><input type="checkbox" id="autoAnalyzeInput"><span>录像结束后自动分析<small>开启后，每跳会自动发送抽取画面给百炼模型，并产生 API 费用。具体费用以实际用量为准。</small></span></label><div class="settings-info">本地拍摄与回看不需要 API Key。自动检测在手机运行，不持续上传摄像头画面。</div><div class="dialog-actions"><button class="button ghost" type="button" id="clearKeyBtn">清除密钥</button><button class="button primary" type="submit">保存本次设置</button></div><a class="external-link" href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">前往阿里云百炼获取 Key ↗</a></form></dialog>
-<dialog id="helpDialog"><div class="dialog-heading"><div><p class="eyebrow">QUICK START</p><h2>让每一跳，完整留下</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭">×</button></div><ol class="help-list"><li><strong>固定手机</strong><p>使用出发点后方机位，尽量完整拍到人和板。手机不要跟拍。相机开启后，可用倍率按钮或滑杆变焦，录像中也能调整；可用范围由手机提供。</p></li><li><strong>直接点击开始探测</strong><p>人物检测资源首次加载需要时间。点击后仅侦测画面变化，检测到出发才启动录像；不需要等待人物锁定或手动画区域。</p></li><li><strong>回来直接回看</strong><p>录像至少 10 秒，并额外保留结束后的 3 秒气垫画面。拍完后摄像头和侦测继续开启，点击准备下一跳可再次录像；手动停止侦测或关闭相机才退出。</p></li><li><strong>按需接入百炼模型</strong><p>在设置中填写自己的 Key、开启自动分析。分析按每秒约 12 张、最多 96 张提取画面；画面增多会增加用量与等待时间。无需选择或输入目标动作。模型分别判断转体和抓板，程序根据引用的画面组合类别；可展开识别依据并回看对应画面。依据不足时保留无法判断。识别到动作类型变化后重新选择重点，暂时无法判断时保留原重点。本地导入的视频按导入顺序衔接。回放默认原速 1×。本机已有同类动作分析后，可打开“两跳对比”；双方都有时间依据的阶段可以按参考点对齐回看，整跳各自从片段起点播放。对比使用本机视频，不增加模型调用。微步按钮按 1/60 秒移动，不同帧率可能出现重复画面。</p></li></ol><div class="settings-info">请保持屏幕解锁、页面在前台。切换应用或锁屏会中断本次拍摄。自动检测仍需现场验证；视频保存在浏览器，清理网站数据会删除记录，重要视频请另行下载。</div><button class="button primary full" data-close="helpDialog">知道了，准备出发</button></dialog>
+<dialog id="helpDialog"><div class="dialog-heading"><div><p class="eyebrow">QUICK START</p><h2>让每一跳，完整留下</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭">×</button></div><ol class="help-list"><li><strong>固定手机</strong><p>使用出发点后方机位，尽量完整拍到人和板。手机不要跟拍。相机开启后，可用倍率按钮或滑杆变焦，录像中也能调整；可用范围由手机提供。</p></li><li><strong>直接点击开始探测</strong><p>人物检测资源首次加载需要时间。点击后仅侦测画面变化，检测到出发才启动录像；不需要等待人物锁定或手动画区域。</p></li><li><strong>回来直接回看</strong><p>录像至少 10 秒，并额外保留结束后的 3 秒气垫画面。拍完后摄像头和侦测继续开启，点击准备下一跳可再次录像；手动停止侦测或关闭相机才退出。</p></li><li><strong>按需接入百炼模型</strong><p>在设置中填写自己的 Key、开启自动分析。分析在本机估计重点区间，前后稀疏取帧、重点区间密集取帧，最多 96 张；自动裁剪人物附近，定位不可靠时保留全画面。只发送这一组带时间戳图片，进行一次模型分析。无需选择或输入目标动作。模型分别判断转体和抓板，程序根据引用的画面组合类别；可展开识别依据并回看对应画面。依据不足时保留无法判断。识别到动作类型变化后重新选择重点，暂时无法判断时保留原重点。本地导入的视频按导入顺序衔接。回放默认原速 1×。本机已有同类动作分析后，可打开“两跳对比”；双方都有时间依据的阶段可以按参考点对齐回看，整跳各自从片段起点播放。对比使用本机视频，不增加模型调用。微步按钮按 1/60 秒移动，不同帧率可能出现重复画面。</p></li></ol><div class="settings-info">请保持屏幕解锁、页面在前台。切换应用或锁屏会中断本次拍摄。自动检测仍需现场验证；视频保存在浏览器，清理网站数据会删除记录，重要视频请另行下载。</div><button class="button primary full" data-close="helpDialog">知道了，准备出发</button></dialog>
 <div class="toast" id="toast" role="status" hidden></div>
-<script type="module" src="./app.js?v=0.11.0"></script>
+<script type="module" src="./app.js?v=0.12.0"></script>
 </body></html>

@@ -13,6 +13,28 @@ const upstream = (text = content(), usage = { prompt_tokens: 16000, completion_t
   new Response(JSON.stringify({ choices: [{ message: { content: text } }], usage }));
 const rejectsCode = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code); assert.ok(!error.message.includes(KEY)); return true; });
 
+const adaptiveInput=()=>input({frames:input().frames.map((f,i)=>({...f,...(i?{crop:{x:100,y:150,width:300,height:400,sourceWidth:720,sourceHeight:1280}}:{})})),samplingMetadata:{strategy:'adaptive-subject-crop',denseWindow:{start:3.6,end:4.5},windowSource:'detected',croppedFrameCount:3}});
+test('adaptive cropped pictures keep real nonuniform timestamps in one request, including Omni',async()=>{
+ for(const model of ['qwen3.7-plus','qwen3.8-omni-flash','qwen3.5-omni-plus','qwen3-omni-flash']){
+  let calls=0;const payload=adaptiveInput();payload.model=model;payload.samplingMetadata.instruction='INJECTED_METADATA';payload.frames[1].crop.note='INJECTED_CROP';
+  const result=await analyzeFrames(payload,{fetchImpl:async(url,options)=>{calls++;const body=JSON.parse(options.body),parts=body.messages[1].content;
+   assert.equal(url,QWEN_ENDPOINT);assert.equal(parts.filter(p=>p.type==='image_url').length,4);assert.ok(!parts.some(p=>p.type==='video'));assert.ok(!JSON.stringify(body).includes('INJECTED_'));
+   assert.match(body.messages[0].content,/非等间隔/);assert.match(body.messages[0].content,/裁剪造成/);assert.match(body.messages[0].content,/正背面/);
+   assert.match(parts[3].text,/1\.500/);assert.match(parts[3].text,/x=100/);assert.match(parts[5].text,/3\.700/);
+   return upstream();}});
+  assert.equal(calls,1);assert.equal(result.sampling,'adaptive-subject-crop');assert.equal(result.samplingMetadata.croppedFrameCount,3);
+ }
+});
+test('malformed crop and sampling summaries are rejected before a paid request',async()=>{
+ const cases=[
+  p=>{p.frames[1].crop.width=900;},p=>{p.frames[1].crop.x=-1;},p=>{p.frames[1].crop.height=.1;},
+  p=>{p.frames[1].crop.sourceWidth=20000;},p=>{p.frames[1].crop=null;},
+  p=>{p.samplingMetadata.croppedFrameCount=0;},p=>{p.samplingMetadata.denseWindow.end=9;},
+  p=>{p.samplingMetadata.windowSource='certain-takeoff';},p=>{p.samplingMetadata.strategy='other';},
+ ];
+ for(const change of cases){const p=adaptiveInput();change(p);let called=false;await assert.rejects(analyzeFrames(p,{fetchImpl:async()=>{called=true;return upstream();}}),e=>['invalid_crop','invalid_sampling_metadata'].includes(e.code));assert.equal(called,false);}
+});
+
 test('browser sends only to official endpoint, no cookies or key in JSON, bounded nonthinking request', async () => {
   let called = 0;
   const result = await analyzeFrames(input(), { fetchImpl: async (url, options) => {

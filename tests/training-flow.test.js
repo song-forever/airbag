@@ -13,6 +13,7 @@ for(const match of source.matchAll(/^import \{([^}]+)\} from '([^']+)';/gm)){
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(match=>match[1]);
 const phaseNames=['助滑','上台','起跳','腾空'];
 const frames=[0,.2,.4,.6].map(time=>({time,dataUrl:'data:image/jpeg;base64,/9j/2Q=='}));
+const preparedFrames={frames,samplingMetadata:{strategy:"adaptive-subject-crop",denseWindow:{start:.2,end:.6},windowSource:"fallback",croppedFrameCount:0},preparation:{denseFrameCount:3}};
 const followUp={status:'done',observation:'本跳能看到上一跳所选动作已保持。',time:.4};
 function report({schemaVersion=5,instruction='下一跳保持双手在身前',check='回看腾空时双手仍在身前',follow=followUp,type='直飞',description='本跳可见保持板身朝向前方。',relation=follow?'same':'none',practiceActionType=type}={}){
  return {model:'qwen3.7-plus',frameCount:4,usage:{},analysis:{schemaVersion,stages:phaseNames.map(phase=>({phase,analysis:phase+'可见表现',time:null})),nextJump:{instruction,reason:'这是本跳最明确且易于执行的动作。',check,time:null},...(schemaVersion>=4?{followUp:follow}:{}),...(schemaVersion>=5?{recognizedAction:{type,description,time:.4},focusRelation:relation,practiceActionType}:{})}};
@@ -43,24 +44,47 @@ function fixture(){
  const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:{getItem:()=>null,setItem(){}},confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
  if(imported.getTrainingContext)globals.getTrainingContext=(...args)=>{events.push('context');return imported.getTrainingContext(...args);};
  const context=vm.createContext(globals);
- vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nthis.testAPI={
+ vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nconst originalExtractor=extractFrames;this.testAPI={
   analyzeCurrent,selectRecord,renderAnalysis,
   setup:(items,selected)=>{records=items;current=selected;apiKey='sk-local-test-only';autoAnalyze=true;},
   provider:fn=>{analyzeFrames=fn;}, extractor:fn=>{extractFrames=fn;},
   replaceHistory:items=>{records=items;},snapshot:()=>({current,records,analysisBusy}),
   save:fn=>{persistRecord=fn;}
+  ,realExtractor:(record,signal)=>originalExtractor(record,signal)
+  ,reader:fn=>{openVideoReader=fn;}
+  ,localDetector:fn=>{loadAnalysisDetector=fn;analysisDetector=null;analysisDetectorPromise=null;}
+  ,preparer:fn=>{prepareAnalysisFrames=fn;}
  };`,context);
  const api=context.testAPI;
- api.extractor(async()=>{events.push('extract');return frames;});
+ api.extractor(async()=>{events.push('extract');return preparedFrames;});
  api.provider(async payload=>{events.push('provider');requests.push(payload);return report({follow:payload.previousFocus?followUp:null});});
  api.save(async record=>{events.push('persist');saved.push(structuredClone(record));return true;});
  return {api,nodes,speeds,events,requests,saved,htmlWrites};
 }
 
+test('a camera clip with a confirmed start still initializes its separate analysis detector',async()=>{
+ const f=fixture(),current=clip('camera',1000);current.contentStartConfirmed=true;
+ const video={duration:6,videoWidth:720,videoHeight:1280};let loaded=0,disposed=0,prepared=0;
+ f.api.reader(async()=>({video,dispose:()=>disposed++}));
+ f.api.localDetector(async()=>{loaded++;return {detectForVideo:()=>({detections:[{boundingBox:{originX:72,originY:128,width:144,height:256},categories:[{score:.9}]}]})};});
+ f.api.preparer(async(v,options)=>{prepared++;assert.equal(loaded,1);assert.equal(v,video);const boxes=options.detectPersons(v);assert.equal(boxes[0].x,.1);assert.equal(boxes[0].w,.2);return preparedFrames;});
+ const result=await f.api.realExtractor(current,new AbortController().signal);
+ assert.equal(result,preparedFrames);assert.equal(loaded,1);assert.equal(prepared,1);assert.equal(disposed,1);assert.equal(f.requests.length,0);
+});
+
+test('cancelling while local analysis detection initializes disposes the video before preparation or API calls',async()=>{
+ const f=fixture(),current=clip('camera',1000);current.contentStartConfirmed=true;
+ const c=new AbortController(),gate=deferred();let loaded=0,disposed=0,prepared=0;
+ f.api.reader(async()=>({video:{duration:6,videoWidth:720,videoHeight:1280},dispose:()=>disposed++}));
+ f.api.localDetector(()=>{loaded++;return gate.promise;});f.api.preparer(async()=>{prepared++;return preparedFrames;});
+ const task=f.api.realExtractor(current,c.signal);await settleUntil(()=>loaded===1);c.abort();
+ await assert.rejects(task,error=>error.name==='AbortError');assert.equal(disposed,1);assert.equal(prepared,0);assert.equal(f.requests.length,0);
+});
+
 test('the next jump sends one prior cue selected once before extraction, then saves its successful snapshot',async()=>{
  const previous=clip('first',1000,{analysis:report({schemaVersion:3,instruction:'起跳时保持双手在身前',check:'离台时双手仍在身前'})});
  const current=clip('second',2000),f=fixture();f.api.setup([current,previous],current);
- f.api.extractor(async()=>{f.events.push('extract');previous.analysis.analysis.nextJump.instruction='抽帧期间源建议被修改';return frames;});
+ f.api.extractor(async()=>{f.events.push('extract');previous.analysis.analysis.nextJump.instruction='抽帧期间源建议被修改';return preparedFrames;});
  await f.api.analyzeCurrent();
  assert.deepEqual(f.events,['context','extract','provider','persist']);
  assert.equal(f.requests.length,1);assert.equal(f.requests[0].previousFocus.instruction,'起跳时保持双手在身前');
@@ -156,7 +180,7 @@ test('failed analysis rolls back provisional automatic trimming and retains the 
  const f=fixture();f.api.setup([current],current);await f.api.selectRecord(current);
  f.api.extractor(async record=>{
   record.trimStart=1.5;record.contentStart=1.5;record.contentStartConfirmed=true;
-  f.nodes.trimStart.value='1.5';f.nodes.trimLabel.textContent='1.5–6.0 秒';return frames;
+  f.nodes.trimStart.value='1.5';f.nodes.trimLabel.textContent='1.5–6.0 秒';return preparedFrames;
  });
  f.api.provider(async()=>{throw new Error('模型读取失败');});await f.api.analyzeCurrent();
  assert.equal(current.trimStart,0);assert.equal(current.trimEnd,6);assert.equal(current.contentStart,.3);assert.equal(current.contentStartConfirmed,false);

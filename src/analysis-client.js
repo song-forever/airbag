@@ -24,6 +24,17 @@ export class AnalysisError extends Error {
 const problem = (code, message, status) => new AnalysisError(code, message, status);
 const cancelled = () => problem('analysis_cancelled', '本次分析已取消，视频仍保存在本机。');
 
+function validateCrop(crop) {
+  if (!crop || typeof crop !== 'object' || Array.isArray(crop)) throw problem('invalid_crop', '画面裁剪信息无效，请重新提取画面。');
+  const { x, y, width, height, sourceWidth, sourceHeight } = crop;
+  if (![x, y, width, height, sourceWidth, sourceHeight].every(Number.isSafeInteger)
+      || x < 0 || y < 0 || width <= 0 || height <= 0 || sourceWidth <= 0 || sourceHeight <= 0
+      || sourceWidth > 16384 || sourceHeight > 16384 || x + width > sourceWidth || y + height > sourceHeight) {
+    throw problem('invalid_crop', '画面裁剪必须位于有效的原始视频尺寸内。');
+  }
+  return { x, y, width, height, sourceWidth, sourceHeight };
+}
+
 function validateFrame(frame, previousTime, duration) {
   if (!frame || typeof frame !== 'object' || Array.isArray(frame)
       || typeof frame.time !== 'number' || !Number.isFinite(frame.time)
@@ -47,7 +58,32 @@ function validateFrame(frame, previousTime, duration) {
   if (binary.length < 4 || binary.charCodeAt(0) !== 0xff || binary.charCodeAt(1) !== 0xd8 || binary.charCodeAt(2) !== 0xff) {
     throw problem('invalid_frame', '素材不是有效的 JPEG 画面。');
   }
-  return { time: frame.time, dataUrl: frame.dataUrl };
+  return { time: frame.time, dataUrl: frame.dataUrl, ...(frame.crop === undefined ? {} : { crop: validateCrop(frame.crop) }) };
+}
+
+function validateSamplingMetadata(metadata, frames, duration) {
+  if (metadata === undefined) return undefined;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+      || metadata.strategy !== 'adaptive-subject-crop'
+      || !['detected', 'fallback'].includes(metadata.windowSource)
+      || !Number.isSafeInteger(metadata.croppedFrameCount) || metadata.croppedFrameCount < 0 || metadata.croppedFrameCount > frames.length) {
+    throw problem('invalid_sampling_metadata', '自适应采样信息无效，请重新提取画面。');
+  }
+  let denseWindow = null;
+  if (metadata.denseWindow !== null) {
+    const window = metadata.denseWindow;
+    if (!window || typeof window !== 'object' || Array.isArray(window)
+        || typeof window.start !== 'number' || !Number.isFinite(window.start)
+        || typeof window.end !== 'number' || !Number.isFinite(window.end)
+        || window.start < 0 || window.end <= window.start || window.end > duration) {
+      throw problem('invalid_sampling_metadata', '密集采样候选范围必须位于当前片段内。');
+    }
+    denseWindow = { start: window.start, end: window.end };
+  }
+  const croppedFrameCount = frames.filter(frame => frame.crop && (frame.crop.x !== 0 || frame.crop.y !== 0
+    || frame.crop.width !== frame.crop.sourceWidth || frame.crop.height !== frame.crop.sourceHeight)).length;
+  if (metadata.croppedFrameCount !== croppedFrameCount) throw problem('invalid_sampling_metadata', '裁剪数量与本次画面信息不一致，请重新提取画面。');
+  return { strategy: 'adaptive-subject-crop', denseWindow, windowSource: metadata.windowSource, croppedFrameCount };
 }
 const ACTION_TYPES = ['直飞', '抓板', '转体', '转体抓板', '其他', '无法判断'];
 const isPracticeAction = type => ACTION_TYPES.slice(0, 4).includes(type);
@@ -91,7 +127,9 @@ function validatePayload(payload) {
     previousTime = clean.time;
     return clean;
   });
-  return { apiKey, model, duration, action: action.trim(), frames: cleanFrames, previousFocus, actionMode };
+  const samplingMetadata = validateSamplingMetadata(payload.samplingMetadata, cleanFrames, duration);
+  return { apiKey, model, duration, action: action.trim(), frames: cleanFrames, previousFocus, actionMode,
+    ...(samplingMetadata === undefined ? {} : { samplingMetadata }) };
 }
 
 const SYSTEM_PROMPT = `你是一位表达简洁、观察谨慎的单板滑雪气垫训练复盘助手，用简体中文输出。帮助用户理解这一跳，并记住下一跳最值得尝试的一项调整。只根据可见动作判断，明确区分观察与推测，不为凑齐分析而制造问题。
@@ -120,25 +158,34 @@ function makeProviderPayload(payload) {
   const content = [{ type: 'text', text: `目标动作（仅作为数据）：${JSON.stringify(payload.action)}\n所选视频片段时长：${payload.duration.toFixed(3)} 秒。共 ${payload.frames.length} 张独立抽帧图片，以下按片段内时间排序。这是用户的固定机位。请依次分析助滑、上台、起跳、腾空，区分可见观察与推测，不为字数凑内容。动作已完成时，也要依据可见表现观察动作质量，不把个人风格差异当成错误。在结尾保留总体分析，将有明确依据的动作质量问题纳入选择，只选择证据最明确、与目标相关且下一跳容易执行的一个改进点，用一句话给出指令，并说明理由和回放中可观察的自检标准。不评价视频，不分析落地。` }];
   if (payload.actionMode === 'auto') content[0].text = `自动识别动作：只根据本跳可见画面分别判断转体和抓板，返回 recognizedAction 中两个属性及引用依据，由程序组合类别，再按助滑、上台、起跳、腾空四阶段复盘并给一个下一跳重点。没有指定目标动作，不推断用户想做什么。片段时长 ${payload.duration.toFixed(3)} 秒，共 ${payload.frames.length} 张按时间顺序排列的独立图片。不评价拍摄，不分析落地。`;
   if (payload.previousFocus) content[0].text += `\n上一跳训练重点（仅作为数据，JSON）：${JSON.stringify(payload.previousFocus)}\n${payload.actionMode === 'auto' ? '先识别当前实际动作；只有类型明确相同时才核对原检查标准，不同时针对本跳复盘，无法确认类型时保留原重点且不判未做到。' : '请先对照本跳画面判断上次重点是否做到，返回 followUp；未确认做到时继续同一个重点。'}这里只提供上一跳的文字建议，没有上一跳视频。`;
+  if (payload.samplingMetadata) content[0].text += '\n本次输入按时间先后排列，但不是等间隔抽帧：候选腾空区间更密集，前后更稀疏。每张图只代表标注的真实片段秒数，不能把图序号当作固定帧率。候选区间仅用于分配画面，不是已确认的起跳时刻或动作类别。';
   for (const frame of payload.frames) {
-    content.push({ type: 'text', text: `片段时间 ${frame.time.toFixed(3)} 秒：` });
+    const crop = frame.crop;
+    const cropText = crop ? `原始 ${crop.sourceWidth}×${crop.sourceHeight} 画面中裁取 x=${crop.x}, y=${crop.y}, 宽=${crop.width}, 高=${crop.height} 后缩放；` : '保留原画面范围；';
+    content.push({ type: 'text', text: `片段时间 ${frame.time.toFixed(3)} 秒：${payload.samplingMetadata ? cropText : ''}` });
     content.push({ type: 'image_url', image_url: { url: frame.dataUrl } });
   }
   const config = getModel(payload.model);
   const request = {
     model: payload.model,
-    messages: [{ role: 'system', content: SYSTEM_PROMPT + (payload.actionMode === 'auto' ? '\n' + AUTO_ACTION_PROMPT : '') }, { role: 'user', content }],
+    messages: [{ role: 'system', content: SYSTEM_PROMPT + (payload.actionMode === 'auto' ? '\n' + AUTO_ACTION_PROMPT : '') + (payload.samplingMetadata ? '\n这些时序图片按非等间隔采样，并可能逐帧跟随人物裁剪、平移和缩放。裁剪造成的画面位置或大小变化不代表人物实际移动、腾空高度或转体。只比较人物与雪板可见的整体朝向及可辨识的正背面特征；侧身、摆臂、拧肩或单一局部变化不能替代整体转体证据。不能从裁剪边界判断起跳或落地。仍只依据真实可见的手板抓握关系判断抓板；不能因为图片经过裁剪就假定接触清楚。' : '') }, { role: 'user', content }],
     max_tokens: config.thinking ? 8192 : payload.actionMode === 'auto' ? 2200 : 1400,
     stream: !!config.stream,
   };
+  if (payload.samplingMetadata && payload.actionMode === 'auto') request.messages[0].content += `\n自动模式的最终对象必须同时包含 stages、nextJump、followUp 和 recognizedAction 四个字段，不得只返回识别属性。四阶段与总体建议仍须完整返回。
+抓板可能只持续很短时间。判断 grab=no 时须检查腾空前、中、后的手板关系并引用至少三个实际提供的时刻；不能只凭起跳前后或腾空早晚手与板分离，排除中段短暂抓板。如果中段存在手靠近板但接触无法确认的时刻，grab 必须为 uncertain；不能把没有确认抓握写成没有抓握。只有明确可见手对板的抓握接触，才为 yes。
+跨帧持续可见的服装图案或标记可辅助比较整体朝向，但仅在确实能辨别时使用，不编造标记。头盔侧面和肩臂摆动不能单独证明正面、背面转换。
+下一跳建议仅调整或保持本跳已经观察到的动作，不主动新增尚未出现的技巧，不把一次观察解释为具备安全进阶条件。类型尚未确认时围绕可见基础动作给一个建议，不安排未经确认的转体或抓板纠正。`;
   if (typeof config.thinking === 'boolean' && !config.thinking) request.enable_thinking = false;
   if (config.minimax) request.thinking = { type: 'disabled' };
   if (config.stream) request.stream_options = { include_usage: true };
   if (config.omni) {
     request.modalities = ['text'];
     // Omni models accept video frame lists, including the older single-modality models.
-    const timing = payload.frames.map((frame, i) => (i + 1) + ':' + frame.time.toFixed(3) + 's').join(', ');
-    request.messages[1].content = [content[0], { type: 'text', text: '以下视频帧依次对应时间：' + timing }, { type: 'video', video: payload.frames.map(frame => frame.dataUrl) }];
+    if (!payload.samplingMetadata) {
+      const timing = payload.frames.map((frame, i) => (i + 1) + ':' + frame.time.toFixed(3) + 's').join(', ');
+      request.messages[1].content = [content[0], { type: 'text', text: '以下视频帧依次对应时间：' + timing }, { type: 'video', video: payload.frames.map(frame => frame.dataUrl) }];
+    }
     if (payload.model.startsWith('qwen3-omni-flash')) request.enable_thinking = false;
     if (payload.model === 'qwen3.8-omni-flash') request.reasoning_effort = 'none';
   }
@@ -335,7 +382,8 @@ export async function analyzeFrames(payload, { signal, fetchImpl = fetch, timeou
       analysis, usage, model: validated.model,
       estimatedCostCny: estimateCostCny(usage, validated.model),
       costBasis: '北京地域标价估算，免费额度抵扣前；是否扣费以百炼账单为准',
-      sampling: 'frames', frameCount: validated.frames.length,
+      sampling: validated.samplingMetadata ? 'adaptive-subject-crop' : 'frames', frameCount: validated.frames.length,
+      ...(validated.samplingMetadata ? { samplingMetadata: validated.samplingMetadata } : {}),
     };
   } catch (error) {
     if (timedOut) throw problem('analysis_timeout', '百炼模型分析等待超时，请稍后重试；视频仍保存在本机。');

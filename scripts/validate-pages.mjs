@@ -26,5 +26,10 @@ for (const asset of assets) {
   assert.equal(createHash('sha256').update(body).digest('hex'), asset.sha256, asset.path);
 }
 const entries = await readdir(dist);
+for (const name of entries.filter(name => name.endsWith('.js'))) {
+  const module = await readFile(new URL(name, dist), 'utf8');
+  for (const match of module.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/g)) await readFile(new URL(match[1], dist));
+}
+for (const unwanted of ['recognition-consensus.js', 'frame-groups-client.js']) assert.ok(!entries.includes(unwanted), 'Superseded multi-group experiment must not be published: ' + unwanted);
 for (const unwanted of ['server', 'worker', '.env', '.openai', 'work', 'tests']) assert.ok(!entries.includes(unwanted), 'Unexpected published file: ' + unwanted);
 console.log('Validated project-relative assets, manifest, direct client and all detection asset hashes.');
