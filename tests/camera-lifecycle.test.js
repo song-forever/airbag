@@ -250,7 +250,8 @@ test('significant continuing motion prevents a quiet-scene finish',async()=>{
 
 test('quiet-scene finish can be queued early but never stops before ten seconds',async()=>{
  const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotion(false);
- f.setNow(3300);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,11000);
+ f.setNow(1999);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,null);
+ f.setNow(2000);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,11000);
  const tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
  f.setNow(10999);tick();assert.equal(f.recorders[0].state,'recording');
  f.setNow(11000);tick();assert.equal(f.recorders[0].state,'inactive');

@@ -313,7 +313,7 @@ function detectLoop() {
    const info=armed&&departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
    drawTarget(info.target);
    if(armed&&info.state==='complete'&&now-recordingStart>=MIN_RECORDING_MS)queueAutoFinish(info.reason,now);
-   if(armed&&departureAt!==null&&lastMotionAt!==null&&now-lastMotionAt>=2200)queueAutoFinish('motion_finished',now);
+   if(armed&&departureAt!==null&&lastMotionAt!==null&&now-lastMotionAt>=1000)queueAutoFinish('motion_finished',now);
   }
  }catch{status('跟踪暂时中断，录像继续；可手动结束',true);}
  inferenceTimer=setTimeout(detectLoop,Math.max(40,180-(performance.now()-started)));
