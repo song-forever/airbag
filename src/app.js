@@ -2,7 +2,7 @@ import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
-import { FrameMotionDetector } from './motion-detector.js?v=0.12.3';
+import { FrameMotionDetector } from './motion-detector.js?v=0.12.5';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
@@ -236,7 +236,8 @@ function detectFrameChange(video) {
  const pixels=motionContext.getImageData(0,0,motionCanvas.width,motionCanvas.height).data;
  const gray=new Uint8Array(pixels.length/4);
  for(let i=0,j=0;i<pixels.length;i+=4,j++)gray[j]=(pixels[i]*77+pixels[i+1]*150+pixels[i+2]*29)>>8;
- motionState=motionDetector.update(gray,performance.now());return motionState.moving;
+ const now=performance.now();
+ motionState=motionDetector.update(gray,now,{learning:armed&&departureAt===null&&now-armedAt<2000});return motionState.moving;
 }
 function startMotionRecording(detections) {
  const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));

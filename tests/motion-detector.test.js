@@ -1,3 +1,4 @@
+import {scene,jitterOffsets,WIDTH,HEIGHT} from './helpers/motion-scene.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -16,7 +17,7 @@ function image({shift=0,box=0,brightness=0,flat=false}={}){
  }
  return data;
 }
-function harness(){let frame,now=0;const context=vm.createContext({Uint8Array,Math,performance:{now:()=>now},motionCanvas:{width,height},motionContext:{drawImage(){},getImageData(){return {data:frame};}},previousMotionFrame:null,motionDetector:Detector?new Detector({width,height}):null,motionState:null});vm.runInContext(source+';this.check=detectFrameChange;',context);return (data,time)=>{frame=data;now=time;return context.check({});};}
+function harness(){let frame,now=0;const context=vm.createContext({Uint8Array,Math,performance:{now:()=>now},motionCanvas:{width,height},motionContext:{drawImage(){},getImageData(){return {data:frame};}},armed:false,armedAt:0,departureAt:null,previousMotionFrame:null,motionDetector:Detector?new Detector({width,height}):null,motionState:null});vm.runInContext(source+';this.check=detectFrameChange;',context);return (data,time)=>{frame=data;now=time;return context.check({});};}
 test('global movement is no longer rejected by camera-shake filtering',()=>{
  const check=harness();check(image({box:15}),1000);check(image({box:15}),1800);
  assert.equal(check(image({shift:3,box:15}),2000),true);
@@ -62,7 +63,17 @@ test('all four excluded edges do not produce motion',()=>{for(const [x,y] of [[2
 
 test('tiny start-level changes do not count as ongoing completion motion',()=>{
  const gray=p=>{const g=new Uint8Array(width*height);for(let i=0;i<g.length;i++)g[i]=p[i*4];return g;};
- const d=new Detector({width,height});d.update(gray(image({box:150})),0);
- const small=d.update(gray(smallPatch(80,40)),180);assert.equal(small.moving,true);assert.equal(small.completionMoving,false);
- const big=d.update(gray(image({shift:3,box:150})),360);assert.equal(big.completionMoving,true);
+ const d=new Detector({width,height});d.update(gray(image({box:150})),0,{learning:false});
+ const small=d.update(gray(smallPatch(80,40)),180,{learning:false});assert.equal(small.moving,true);assert.equal(small.completionMoving,false);
+ const big=d.update(gray(image({shift:3,box:150})),360,{learning:false});assert.equal(big.completionMoving,true);
+});
+
+test('empty high-contrast ramp with only subpixel camera jitter never starts or sustains motion',()=>{
+ const detector=new Detector({width:WIDTH,height:HEIGHT});
+ detector.update(scene(),0);
+ for(let n=1;n<=50;n++){
+  const signal=detector.update(scene(jitterOffsets[n%jitterOffsets.length]),n*180);
+  assert.equal(signal.moving,false,`empty frame ${n} cannot start: ${JSON.stringify(signal)}`);
+  assert.equal(signal.completionMoving,false,`empty frame ${n} cannot keep recording alive`);
+ }
 });

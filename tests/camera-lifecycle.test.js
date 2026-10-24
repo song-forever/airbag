@@ -1,3 +1,4 @@
+import {scene,rgba,jitterOffsets} from './helpers/motion-scene.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -30,7 +31,8 @@ function fixture({getUserMedia,wakeRequest}={}){
  const actions=['直飞','抓板','转体','自定义'].map(action=>{const el=new Element();el.dataset.action=action;return el;});
  const speeds=['0.25','0.5','1'].map(speed=>{const el=new Element();el.dataset.speed=speed;return el;});
  const document=new EventTarget();document.hidden=false;document.body=new Element();
- document.getElementById=id=>nodes[id];document.createElement=tag=>new Element(tag);
+ let motionPixels=new Uint8Array(160*90*4);
+ document.getElementById=id=>nodes[id];document.createElement=tag=>{const el=new Element(tag);if(tag==='canvas'){const getContext=el.getContext.bind(el);el.getContext=()=>({...getContext(),getImageData:()=>({data:motionPixels})});}return el;};
  document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-action]'?actions:query==='[data-speed]'?speeds:query.startsWith('[data-action],')?[...actions,nodes.actionDetail,nodes.focusInput]:[];
  const recorders=[];
  class Recorder {
@@ -61,7 +63,7 @@ function fixture({getUserMedia,wakeRequest}={}){
   setDetectorBoxes:boxes=>{detector={detectForVideo:()=>({detections:boxes})};},
   setDetector:(onDetect=()=>{})=>{detector={detectForVideo:()=>{onDetect();return {detections:[]};}};}};`,context);
  context.testAPI.setDetector();context.testAPI.mockProcessing();
- return {api:context.testAPI,document,window,nodes,recorders,timers,setNow:value=>now=value};
+ return {api:context.testAPI,document,window,nodes,recorders,timers,setNow:value=>now=value,setFrame:pixels=>motionPixels=pixels};
 }
 
 test('concurrent camera opens use one permission request and one camera stream',async()=>{
@@ -262,4 +264,48 @@ test('resumed substantial motion cancels a pending quiet-scene finish',async()=>
  f.api.setMotion(true);f.setNow(4000);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,null);
  const tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
  f.setNow(11000);tick();assert.equal(f.recorders[0].state,'recording');
+});
+
+const tickMotionFrame=(f,time,frame)=>{f.setNow(time);f.setFrame(rgba(frame));f.api.detectLoop();};
+const tickCaptureClock=f=>[...f.timers.values()].find(item=>item.kind==='interval').fn();
+test('a tiny rider emerging from an occluder preserves the 2s warmup, 350ms confirmation and edge exclusion',async()=>{
+ const edge=fixture();edge.setFrame(rgba(scene()));await edge.api.armCapture();
+ // All four edge patches remain outside the 10% central motion area.
+ for(const [i,box] of [{x:2,y:40,w:5,h:8},{x:153,y:40,w:5,h:8},{x:80,y:1,w:5,h:5},{x:80,y:84,w:5,h:5}].entries())tickMotionFrame(edge,3000+i*180,scene({edgePatch:box}));
+ assert.equal(edge.recorders.length,0,'edge-only changes must not arm a recorder');
+ edge.api.finishCapture('manual',true);
+ const f=fixture();f.setNow(5000);f.setFrame(rgba(scene()));await f.api.armCapture();
+ // A 3×7 subject occupies 0.15% of the buffer, far below the former 5% gate.
+ // It is initially hidden behind x=80, then increasingly visible.
+ const rider=x=>scene({rider:{x,y:54,w:3,h:7,value:20},clipX:80});
+ for(const [time,x] of [[5100,79],[5280,82],[5460,85],[5640,88],[6999,91]])tickMotionFrame(f,time,rider(x));
+ assert.equal(f.recorders.length,0,'warmup cannot count toward continuous confirmation');
+ assert.equal(f.api.snapshot().motionSince,null);
+ tickMotionFrame(f,7000,rider(94));assert.equal(f.recorders.length,0);
+ tickMotionFrame(f,7180,rider(97));assert.equal(f.recorders.length,0);
+ tickMotionFrame(f,7350,rider(100));assert.equal(f.recorders.length,1,'350ms of local movement starts recording');
+ f.api.finishCapture('manual',true);await f.recorders[0].onstop();
+});
+
+test('subpixel background jitter after a rider disappears allows 1s quiet + 3s tail, with 10s total minimum',async()=>{
+ for(const lastMovementAt of [1000,12000]){
+  const f=fixture();f.setFrame(rgba(scene()));await f.api.armCapture();f.api.startMotionRecording([]);
+  // Stationary visible people are irrelevant to the quiet-scene stop decision.
+  f.api.setDetectorBoxes([{boundingBox:{originX:500,originY:250,width:80,height:180},categories:[{score:.8}]}]);
+  if(lastMovementAt>1000){
+   tickMotionFrame(f,lastMovementAt-180,scene({rider:{x:90,y:54,w:4,h:8,value:20}}));
+   tickMotionFrame(f,lastMovementAt,scene()); // Disappearance is the final real change.
+  }
+  for(let offset=180;offset<1000;offset+=180){
+   tickMotionFrame(f,lastMovementAt+offset,scene(jitterOffsets[(offset/180)%jitterOffsets.length]));
+   assert.equal(f.api.snapshot().autoFinishAt,null,'one quiet second is required');
+  }
+  tickMotionFrame(f,lastMovementAt+999,scene());assert.equal(f.api.snapshot().autoFinishAt,null);
+  tickMotionFrame(f,lastMovementAt+1000,scene({dx:.3,dy:.2}));
+  const expectedEnd=Math.max(11000,lastMovementAt+4000);
+  assert.equal(f.api.snapshot().autoFinishAt,expectedEnd,'queue after 1s; retain 3s tail and 10s minimum');
+  tickMotionFrame(f,expectedEnd-1,scene({dx:-.25,dy:-.15}));tickCaptureClock(f);assert.equal(f.recorders[0].state,'recording');
+  tickMotionFrame(f,expectedEnd,scene({dx:.2,dy:-.2}));tickCaptureClock(f);assert.equal(f.recorders[0].state,'inactive');
+  await f.recorders[0].onstop();assert.equal(f.api.snapshot().detectionActive,true);
+ }
 });
