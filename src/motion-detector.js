@@ -8,7 +8,7 @@ export class FrameMotionDetector {
   const {width:w,height:h}=this;
   if(frame.length!==w*h||!Number.isFinite(now))throw new TypeError('Invalid motion frame or timestamp');
   const old=this.previous;this.previous=new Uint8Array(frame);
-  if(!old)return {moving:false,cameraMoving:false,ready:false,changedRatio:0};
+  if(!old)return {moving:false,cameraMoving:false,ready:false,changedRatio:0,completionMoving:false};
   const left=Math.ceil(w*this.edgeRatio),top=Math.ceil(h*this.edgeRatio);
   const right=w-left,bottom=h-top,count=(right-left)*(bottom-top);
   let drift=0;
@@ -19,7 +19,8 @@ export class FrameMotionDetector {
    if(Math.abs(frame[y*w+x]-old[y*w+x]-drift)>18)changed++;
   }
   // Keep a small pixel/noise floor, without requiring 5% of the entire image
-  // or rejecting motion as camera shake. The app owns the timed start gates.
-  return {moving:changed>=this.minChangedPixels,cameraMoving:false,ready:true,changedRatio:changed/count};
+  // or rejecting motion as camera shake. Completion uses a separate 0.2%
+  // activity floor so tiny start-level noise does not keep a clip alive.
+  return {moving:changed>=this.minChangedPixels,cameraMoving:false,ready:true,changedRatio:changed/count,completionMoving:changed>=Math.max(this.minChangedPixels,Math.ceil(count*.002))};
  }
 }

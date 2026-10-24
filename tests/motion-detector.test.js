@@ -50,7 +50,7 @@ test('nearby rider covering most cells does not suppress departure while backgro
 test('a large local change survives the production consecutive-motion departure gate',()=>{
  const loop=app.slice(app.indexOf('function detectLoop()'),app.indexOf('function finishCapture('));
  let now=0,frame,starts=0;
- const context=vm.createContext({Uint8Array,Math,performance:{now:()=>now},motionCanvas:{width,height},motionContext:{drawImage(){},getImageData(){return {data:frame}}},motionDetector:new Detector({width,height}),motionState:null,motionSince:null,lastMotionAt:null,armedAt:0,detectionActive:true,stream:{},cameraZoom:{state:{busy:false}},zoomQuietUntil:0,ui:{cameraVideo:{readyState:4,videoWidth:720,videoHeight:1280},cameraHint:{}},detector:null,analysisBusy:false,finishing:false,armed:true,departureAt:null,firstPersonAt:null,recordingStart:0,MIN_RECORDING_MS:10000,tracker:{update:()=>({state:'tracking',target:null})},drawTarget(){},queueAutoFinish(){},startMotionRecording(){starts++;context.departureAt=now;context.recordingStart=now},status(){},setTimeout(){},inferenceTimer:null});
+ const context=vm.createContext({Uint8Array,Math,performance:{now:()=>now},motionCanvas:{width,height},motionContext:{drawImage(){},getImageData(){return {data:frame}}},motionDetector:new Detector({width,height}),motionState:null,motionSince:null,lastMotionAt:null,autoFinishAt:null,autoFinishReason:"",armedAt:0,detectionActive:true,stream:{},cameraZoom:{state:{busy:false}},zoomQuietUntil:0,ui:{cameraVideo:{readyState:4,videoWidth:720,videoHeight:1280},cameraHint:{}},detector:null,analysisBusy:false,finishing:false,armed:true,departureAt:null,firstPersonAt:null,recordingStart:0,MIN_RECORDING_MS:10000,tracker:{update:()=>({state:'tracking',target:null})},drawTarget(){},queueAutoFinish(){},startMotionRecording(){starts++;context.departureAt=now;context.recordingStart=now},status(){},setTimeout(){},inferenceTimer:null});
  vm.runInContext(source+'\n'+loop+';this.tick=detectLoop;',context);
  for(const [time,shift] of [[1000,0],[1800,0],[2000,3],[2180,6],[2360,9]]){now=time;frame=largeMovingRider(shift);context.tick();}
  assert.equal(starts,1);
@@ -59,3 +59,10 @@ test('a large local change survives the production consecutive-motion departure 
 function smallPatch(x,y){const p=image({box:150});for(let dy=0;dy<3;dy++)for(let dx=0;dx<3;dx++){const i=((y+dy)*width+x+dx)*4;p[i]=p[i+1]=p[i+2]=255;}return p;}
 test('small far-away subjects below five percent still produce motion',()=>{const check=harness();check(image({box:150}),0);assert.equal(check(smallPatch(80,40),180),true);});
 test('all four excluded edges do not produce motion',()=>{for(const [x,y] of [[2,40],[155,40],[80,2],[80,85]]){const check=harness();check(image({box:150}),0);assert.equal(check(smallPatch(x,y),180),false);}});
+
+test('tiny start-level changes do not count as ongoing completion motion',()=>{
+ const gray=p=>{const g=new Uint8Array(width*height);for(let i=0;i<g.length;i++)g[i]=p[i*4];return g;};
+ const d=new Detector({width,height});d.update(gray(image({box:150})),0);
+ const small=d.update(gray(smallPatch(80,40)),180);assert.equal(small.moving,true);assert.equal(small.completionMoving,false);
+ const big=d.update(gray(image({shift:3,box:150})),360);assert.equal(big.completionMoving,true);
+});

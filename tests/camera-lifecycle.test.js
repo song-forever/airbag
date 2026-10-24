@@ -55,8 +55,10 @@ function fixture({getUserMedia,wakeRequest}={}){
   snapshot:()=>({stream,armed,finishing,activeCapture:typeof activeCapture==='undefined'?null:activeCapture,records,armTimer,wakeLock,detectionActive,zoom:{...cameraZoom.state},zoomQuietUntil,motionSince,autoFinishAt,autoFinishReason}),
   mockProcessing:()=>{getVideoMetadata=async()=>({duration:6,width:1280,height:720});getPoster=async()=>'';persistRecord=async()=>true;selectRecord=async record=>{current=record;};},
   deferSave:promise=>{getVideoMetadata=()=>promise;},
+  setMotionSignal:signal=>{motionDetector.update=()=>signal;},
   setMotion:moving=>{motionDetector.update=()=>({moving,ready:true,cameraMoving:false,changedRatio:moving ? .2 : 0});},
   setTrackerResult:result=>{tracker.update=()=>result;},
+  setDetectorBoxes:boxes=>{detector={detectForVideo:()=>({detections:boxes})};},
   setDetector:(onDetect=()=>{})=>{detector={detectForVideo:()=>{onDetect();return {detections:[]};}};}};`,context);
  context.testAPI.setDetector();context.testAPI.mockProcessing();
  return {api:context.testAPI,document,window,nodes,recorders,timers,setNow:value=>now=value};
@@ -225,4 +227,38 @@ test('a brief change after warmup still needs continuous confirmation',async()=>
  f.api.setMotion(false);f.setNow(3200);f.api.detectLoop();
  f.api.setMotion(true);f.setNow(3400);f.api.detectLoop();f.setNow(3600);f.api.detectLoop();assert.equal(f.recorders.length,0);
  f.setNow(3750);f.api.detectLoop();assert.equal(f.recorders.length,1);
+});
+
+test('tiny continuous image noise cannot keep a completed empty scene recording forever',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);
+ f.api.setMotionSignal({moving:true,ready:true,cameraMoving:false,changedRatio:.0004});
+ for(const now of [1500,3000,5000,8000,11000,13000]){f.setNow(now);f.api.detectLoop();}
+ assert.notEqual(f.api.snapshot().autoFinishAt,null,'finished quiet scene must queue automatic completion despite tiny start-level motion');
+});
+
+test('a stationary visible person does not block a quiet-scene finish',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotionSignal({moving:false,ready:true,cameraMoving:false,changedRatio:0});
+ f.api.setDetectorBoxes([{boundingBox:{originX:500,originY:250,width:80,height:180},categories:[{score:.8}]}]);
+ for(const now of [1500,4000,11000]){f.setNow(now);f.api.detectLoop();}
+ assert.notEqual(f.api.snapshot().autoFinishAt,null);
+});
+test('significant continuing motion prevents a quiet-scene finish',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotionSignal({moving:true,ready:true,cameraMoving:false,changedRatio:.01});
+ for(const now of [1500,4000,8000,11000,15000]){f.setNow(now);f.api.detectLoop();}
+ assert.equal(f.api.snapshot().autoFinishAt,null);
+});
+
+test('quiet-scene finish can be queued early but never stops before ten seconds',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotion(false);
+ f.setNow(3300);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,11000);
+ const tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
+ f.setNow(10999);tick();assert.equal(f.recorders[0].state,'recording');
+ f.setNow(11000);tick();assert.equal(f.recorders[0].state,'inactive');
+});
+test('resumed substantial motion cancels a pending quiet-scene finish',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotion(false);
+ f.setNow(3300);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishReason,'motion_finished');
+ f.api.setMotion(true);f.setNow(4000);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,null);
+ const tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
+ f.setNow(11000);tick();assert.equal(f.recorders[0].state,'recording');
 });

@@ -2,7 +2,7 @@ import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
-import { FrameMotionDetector } from './motion-detector.js?v=0.12.2';
+import { FrameMotionDetector } from './motion-detector.js?v=0.12.3';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
@@ -247,7 +247,7 @@ function startMotionRecording(detections) {
  capture.onstop=()=>{if(finalized||recorder!==capture)return;finalized=true;return finalizeRecording();};
  recorder=capture;chunks=captureChunks;recordingStart=performance.now();
  try{capture.start(1000);}catch(error){recorder=null;chunks=[];throw error;}
- departureAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
+ departureAt=recordingStart;lastMotionAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
  setCaptureControls(true);ui.stopBtn.textContent='■ 结束并保存';
  ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');
  ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';status('已检测到画面运动，开始录像');
@@ -287,7 +287,13 @@ function detectLoop() {
   const zoomSettling=cameraZoom.state.busy||performance.now()<zoomQuietUntil;
   if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，等待画面稳定 · 尚未录像';
   if(video.readyState>=2&&video.videoWidth&&!zoomSettling){
-   const now=performance.now(),changed=detectFrameChange(video);if(changed)lastMotionAt=now;
+   const now=performance.now(),changed=detectFrameChange(video);
+   // Starting is deliberately sensitive; completion ignores tiny pixel noise.
+   const completionMotion=motionState?.completionMoving??(motionState?.changedRatio>=.002);
+   if(completionMotion){
+    lastMotionAt=now;
+    if(autoFinishReason==='motion_finished'){autoFinishAt=null;autoFinishReason='';ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';}
+   }
    let detections=[];
    if(detector&&!analysisBusy&&!finishing){try{
     const result=detector.detectForVideo(video,now);
@@ -307,7 +313,7 @@ function detectLoop() {
    const info=armed&&departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
    drawTarget(info.target);
    if(armed&&info.state==='complete'&&now-recordingStart>=MIN_RECORDING_MS)queueAutoFinish(info.reason,now);
-   if(armed&&departureAt!==null&&!detections.length&&now-recordingStart>=MIN_RECORDING_MS&&lastMotionAt!==null&&now-lastMotionAt>=2200)queueAutoFinish('motion_finished',now);
+   if(armed&&departureAt!==null&&lastMotionAt!==null&&now-lastMotionAt>=2200)queueAutoFinish('motion_finished',now);
   }
  }catch{status('跟踪暂时中断，录像继续；可手动结束',true);}
  inferenceTimer=setTimeout(detectLoop,Math.max(40,180-(performance.now()-started)));
