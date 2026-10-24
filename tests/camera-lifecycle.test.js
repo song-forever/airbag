@@ -211,3 +211,18 @@ test('a zoom completion from a closed camera cannot change the new camera or its
  assert.equal(state.zoomQuietUntil,quiet);assert.equal(old.track.stops,1);assert.equal(current.track.stops,0);
  f.api.closeCamera();
 });
+
+test('first two seconds cannot trigger; continuous confirmation starts only afterwards',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.setMotion(true);
+ for(const time of [1200,1600,2200,2800,2999]){f.setNow(time);f.api.detectLoop();}
+ assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().motionSince,null);
+ f.setNow(3000);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ f.setNow(3349);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ f.setNow(3350);f.api.detectLoop();assert.equal(f.recorders.length,1);
+});
+test('a brief change after warmup still needs continuous confirmation',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.setMotion(true);f.setNow(3000);f.api.detectLoop();
+ f.api.setMotion(false);f.setNow(3200);f.api.detectLoop();
+ f.api.setMotion(true);f.setNow(3400);f.api.detectLoop();f.setNow(3600);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ f.setNow(3750);f.api.detectLoop();assert.equal(f.recorders.length,1);
+});

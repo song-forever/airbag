@@ -2,7 +2,7 @@ import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
-import { FrameMotionDetector } from './motion-detector.js?v=0.12.1';
+import { FrameMotionDetector } from './motion-detector.js?v=0.12.2';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
@@ -25,7 +25,7 @@ let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
 let tracker = new JumpTracker({maxDurationMs:MAX_RECORDING_MS, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
 const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
 const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
-const motionDetector=new FrameMotionDetector({width:160,height:90,threshold:.05});
+const motionDetector=new FrameMotionDetector({width:160,height:90,edgeRatio:.1,minChangedPixels:3});
 let motionState=null,motionSince=null,lastMotionAt=null;
 let zoomQuietUntil=0;
 const cameraZoom=new CameraZoom({onChange:renderCameraZoom,onTransition:resetMotionForZoom});
@@ -254,12 +254,13 @@ function startMotionRecording(detections) {
 }
 async function armCapture() {
  if(armed||processing||finishing||analysisBusy)return;
+ const clickedAt=performance.now();
  processing=true;ui.armBtn.disabled=true;ui.armLabel.textContent='正在准备…';setCaptureControls(false);
  try{
   await openCamera();
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
-  recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
+  recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=clickedAt;discardCapture=false;finishing=false;pendingReason='';
   armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();motionDetector.reset();motionState=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
   // Person detection helps follow the attempt, but must not block motion start.
   loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
@@ -293,8 +294,9 @@ function detectLoop() {
     detections=(result.detections||[]).map(d=>({x:d.boundingBox.originX/video.videoWidth,y:d.boundingBox.originY/video.videoHeight,w:d.boundingBox.width/video.videoWidth,h:d.boundingBox.height/video.videoHeight,score:d.categories[0]?.score||0}));
    }catch{/* Motion detection continues if person inference fails. */}}
    if(armed&&departureAt===null){
-    ui.cameraHint.textContent=motionState?.cameraMoving?'相机晃动，等待画面稳定':motionState?.ready?'正在侦测 · 尚未录像':'等待画面稳定 · 尚未录像';
-    if(changed){
+    const warmingUp=now-armedAt<2000;
+    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待持续运动';
+    if(!warmingUp&&changed){
      if(motionSince===null)motionSince=now;
      if(now-motionSince>=350){
       try{startMotionRecording(detections);}catch(error){finishCapture('track_ended',true);toast('未能开始录像：'+error.message);return;}
