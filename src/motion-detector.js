@@ -10,10 +10,9 @@ export class FrameMotionDetector {
   const old=this.previous;this.previous=new Uint8Array(frame);
   if(!old){this.readyAt=now+this.settleMs;return {moving:false,cameraMoving:false,ready:false,changedRatio:0};}
   let drift=0;for(let i=0;i<frame.length;i++)drift+=frame[i]-old[i];drift/=frame.length;
-  const cells=new Uint32Array(12),sizes=new Uint32Array(12);let changed=0;
+  let changed=0;
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){
-   const cell=Math.min(2,Math.floor(y*3/h))*4+Math.min(3,Math.floor(x*4/w));sizes[cell]++;
-   if(Math.abs(frame[y*w+x]-old[y*w+x]-drift)>18){changed++;cells[cell]++;}
+   if(Math.abs(frame[y*w+x]-old[y*w+x]-drift)>18){changed++;}
   }
   const ratio=changed/frame.length;
   let cameraMoving=false;
@@ -28,8 +27,25 @@ export class FrameMotionDetector {
     if(candidate.error<best.error){best=candidate;dxBest=dx;dyBest=dy;}
    }
    const shifted=(dxBest!==0||dyBest!==0)&&base.error-best.error>2&&best.error<base.error*.65&&best.matching>.65;
-   const broad=cells.reduce((n,count,i)=>n+(count/sizes[i]>.18?1:0),0)>=9;
-   cameraMoving=shifted||broad;
+   // A nearby rider can change most cells. Confirm translation against
+   // textured background instead of treating a large changed area as shake.
+   let stableBackgroundCells=0,translationCells=0;
+   if(shifted){
+    const stats=Array.from({length:12},()=>({base:0,shift:0,texture:0,n:0}));
+    for(let y=9;y<h-9;y+=4)for(let x=9;x<w-9;x+=4){
+     const cell=Math.min(2,Math.floor(y*3/h))*4+Math.min(3,Math.floor(x*4/w)),s=stats[cell];
+     s.base+=Math.min(Math.abs(frame[y*w+x]-old[y*w+x]-drift),36);
+     s.shift+=Math.min(Math.abs(frame[(y+dyBest)*w+x+dxBest]-old[y*w+x]-drift),36);
+     if(Math.abs(old[y*w+x]-old[y*w+x-1])>12)s.texture++;s.n++;
+    }
+    for(const s of stats){
+     if(s.n<4||s.texture<3)continue;
+     const baseError=s.base/s.n,shiftError=s.shift/s.n;
+     if(baseError<=3)stableBackgroundCells++;
+     if(baseError-shiftError>2&&shiftError<baseError*.65)translationCells++;
+    }
+   }
+   cameraMoving=shifted&&stableBackgroundCells<2&&translationCells>=3;
   }
   if(cameraMoving)this.readyAt=now+this.shakeCooldownMs;
   const ready=now>=this.readyAt;

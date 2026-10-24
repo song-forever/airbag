@@ -33,3 +33,25 @@ test('uniform lighting changes alone do not trigger departure',()=>{
 test('a rider moving against a plain background is not mistaken for camera shake',()=>{
  const check=harness();check(image({box:5,flat:true}),1000);check(image({box:5,flat:true}),1800);assert.equal(check(image({box:40,flat:true}),2000),true);
 });
+
+function largeMovingRider(shift){
+ const data=image({box:150});
+ for(let y=0;y<height;y++)for(let x=0;x<112;x++){
+  const px=(x-shift+width)%width;
+  const value=35+((Math.imul(px+17,73856093)^Math.imul(y+31,19349663))>>>0)%150;
+  const i=(y*width+x)*4;data[i]=data[i+1]=data[i+2]=value;
+ }
+ return data;
+}
+test('nearby rider covering most cells does not suppress departure while background stays fixed',()=>{
+ const check=harness();check(largeMovingRider(0),1000);check(largeMovingRider(0),1800);
+ assert.equal(check(largeMovingRider(3),2000),true,'stationary textured background contradicts global camera translation');
+});
+test('a large local change survives the production consecutive-motion departure gate',()=>{
+ const loop=app.slice(app.indexOf('function detectLoop()'),app.indexOf('function finishCapture('));
+ let now=0,frame,starts=0;
+ const context=vm.createContext({Uint8Array,Math,performance:{now:()=>now},motionCanvas:{width,height},motionContext:{drawImage(){},getImageData(){return {data:frame}}},motionDetector:new Detector({width,height}),motionState:null,motionSince:null,lastMotionAt:null,detectionActive:true,stream:{},cameraZoom:{state:{busy:false}},zoomQuietUntil:0,ui:{cameraVideo:{readyState:4,videoWidth:720,videoHeight:1280},cameraHint:{}},detector:null,analysisBusy:false,finishing:false,armed:true,departureAt:null,firstPersonAt:null,recordingStart:0,MIN_RECORDING_MS:10000,tracker:{update:()=>({state:'tracking',target:null})},drawTarget(){},queueAutoFinish(){},startMotionRecording(){starts++;context.departureAt=now;context.recordingStart=now},status(){},setTimeout(){},inferenceTimer:null});
+ vm.runInContext(source+'\n'+loop+';this.tick=detectLoop;',context);
+ for(const [time,shift] of [[1000,0],[1800,0],[2000,3],[2180,6],[2360,9]]){now=time;frame=largeMovingRider(shift);context.tick();}
+ assert.equal(starts,1);
+});

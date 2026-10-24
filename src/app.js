@@ -2,7 +2,7 @@ import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
-import { FrameMotionDetector } from './motion-detector.js?v=0.6.0';
+import { FrameMotionDetector } from './motion-detector.js?v=0.12.1';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
