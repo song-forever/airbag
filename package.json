@@ -1,6 +1,6 @@
 {
   "name": "airbag-coach",
-  "version": "0.12.5",
+  "version": "0.13.1",
   "private": true,
   "type": "module",
   "scripts": {

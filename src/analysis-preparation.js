@@ -1,5 +1,5 @@
 import { getScoutFrameTimes, getAdaptiveFrameTimes } from './frame-sampling.js?v=0.12.0';
-import { planSubjectCrops, estimateAirborneWindow, estimateSubjectWindow } from './subject-crop.js?v=0.12.0';
+import { planSubjectCrops, estimateAirborneWindow, estimateSubjectWindow } from './subject-crop.js?v=0.13.1';
 import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
 
 const checkAbort = signal => { if (signal?.aborted) throw new DOMException('画面提取已取消。', 'AbortError'); };

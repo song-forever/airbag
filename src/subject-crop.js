@@ -60,9 +60,9 @@ function associate(boxes, previous, time, velocity, diagonal) {
   return { box: ranked[0]?.box ?? null, ambiguous: false };
 }
 function cropRect(box, referenceHeight, width, height) {
-  const side = Math.max(referenceHeight * 0.9, width * 0.03, 8);
-  const top = Math.max(referenceHeight * 0.35, height * 0.02, 4);
-  const bottom = Math.max(referenceHeight * 0.6, height * 0.04, 8);
+  const side = Math.max(referenceHeight * 0.12, width * 0.015, 8);
+  const top = Math.max(referenceHeight * 0.06, height * 0.01, 4);
+  const bottom = Math.max(referenceHeight * 0.22, height * 0.02, 8);
   const cropWidth = Math.ceil(box.width + side * 2), cropHeight = Math.ceil(box.height + top + bottom);
   if (cropWidth > width || cropHeight > height) return { rect: null, reason: 'bounds' };
   // Translate the intact window into the source image; do not squeeze its
@@ -85,6 +85,7 @@ function trackObservations(observations, width, height) {
     stats.ignoredDetections += detections.length - boxes.length;
     return { time: item.time, boxes, box: null, ambiguous: false, source: null };
   });
+  const recent=[];
   let velocitySamples = 0, velocityAnchor = null;
   let previous = null, velocity = { x: 0, y: 0 }, initialized = false;
   for (const state of states) {
@@ -93,7 +94,21 @@ function trackObservations(observations, width, height) {
       state.ambiguous = !state.box && state.boxes.length > 1;
       if (state.box) initialized = true;
     } else if (previous) {
-      const matched = associate(state.boxes, previous, state.time, velocity, Math.hypot(width, height));
+      let matched = associate(state.boxes, previous, state.time, velocity, Math.hypot(width, height));
+      // A detector can briefly return only part of the same body. Compare a
+      // rebound with recent full boxes, never across a long gap or an ambiguous
+      // frame. The restored size must remain close to that earlier body.
+      if(!matched.box&&!matched.ambiguous&&state.boxes.length===1){
+       const candidate=state.boxes[0];
+       for(const reference of [...recent].reverse()){
+        if(state.time-reference.time>MAX_GAP+EPSILON)break;
+        const wasPartial=previous.box.height<reference.box.height*.75||previous.box.width<reference.box.width*.7;
+        const hr=candidate.height/reference.box.height,wr=candidate.width/reference.box.width;
+        if(!wasPartial||hr<.7||hr>1.4||wr<.6||wr>1.6||iou(previous.box,reference.box)<.1)continue;
+        const recovered=associate(state.boxes,reference,state.time,{x:0,y:0},Math.hypot(width,height));
+        if(recovered.box){matched=recovered;break;}
+       }
+      }
       state.box = matched.box; state.ambiguous = matched.ambiguous;
     }
     if (state.ambiguous) stats.ambiguous++;
@@ -107,7 +122,8 @@ function trackObservations(observations, width, height) {
       velocityAnchor = state; velocitySamples++;
     }
     if (!velocityAnchor) velocityAnchor = state;
-    state.source = 'detected'; previous = state;
+    state.source = 'detected'; previous = state;recent.push(state);
+    while(recent.length&&state.time-recent[0].time>MAX_GAP+EPSILON)recent.shift();
   }
   const reliable = states.filter(state => state.source === 'detected');
   // A lone detection does not establish a trajectory or identity.
@@ -207,8 +223,12 @@ export function estimateSubjectWindow(observations, { duration } = {}) {
   if (!Number.isFinite(duration) || duration <= 0) return null;
   try { validateObservations(observations); } catch { return null; }
   if (observations.some(item => item.time > duration + EPSILON)) return null;
-  const { reliable } = trackObservations(observations, 1000, 1000);
+  const { states, reliable } = trackObservations(observations, 1000, 1000);
   if (reliable.length < 3 || reliable.at(-1).time - reliable[0].time < 0.25) return null;
+  // A disconnected early track does not establish the full visible interval.
+  // Later detections may be the same rider after a camera/scale change or a
+  // different person. Keep the clip-wide fallback instead of discarding them.
+  if(states.some(state=>state.time>reliable.at(-1).time+0.35+EPSILON&&state.boxes.length))return null;
   return {
     start: Number(Math.max(0, reliable[0].time - 0.2).toFixed(3)),
     end: Number(Math.min(duration, reliable.at(-1).time + 0.35).toFixed(3)),

@@ -8,17 +8,17 @@ const plan=(items,options={})=>planSubjectCrops(items,{...dimensions,...options}
 const crops=result=>result.frames.filter(frame=>frame.rect);
 const contains=(r,b,{width,height}=dimensions)=>r.x<=b.x*width+1e-8&&r.y<=b.y*height+1e-8&&r.x+r.width+1e-8>=(b.x+b.w)*width&&r.y+r.height+1e-8>=(b.y+b.h)*height;
 
-test('one output per timestamp, original pixel padding in portrait and landscape',()=>{
+test('one output per timestamp uses the selected tight crop in portrait and landscape',()=>{
  for(const size of [dimensions,{width:1280,height:720}]){
   const b=box(),items=[obs(0,[b]),obs(.1,[b])],result=planSubjectCrops(items,size);
   assert.equal(result.frames.length,items.length);
-  for(const f of result.frames){assert.equal(f.source,'detected');assert.ok(contains(f.rect,b,size));assert.ok(f.rect.width>=b.w*size.width+1.8*b.h*size.height);assert.ok(f.rect.height>=b.h*size.height*1.95);assert.ok(Object.values(f.rect).every(Number.isInteger));}
+  for(const f of result.frames){assert.equal(f.source,'detected');assert.ok(contains(f.rect,b,size));assert.deepEqual(f.rect,size.width===720?{x:308,y:371,width:74,height:169}:{x:556,y:208,width:116,height:96});assert.ok(Object.values(f.rect).every(Number.isInteger));}
  }
 });
-test('nearby upright boxes keep hand and board space during a crouch',()=>{
+test('the tight crop still contains nearby upright boxes during a crouch',()=>{
  const upright=box({w:.025,h:.12}),crouch=box({w:.025,y:.34,h:.07});
  const middle=plan([obs(0,[upright]),obs(.1,[crouch]),obs(.2,[upright])]).frames[1];
- assert.ok(middle.rect.width>=crouch.w*720+1.8*upright.h*1280);assert.ok(contains(middle.rect,crouch));
+ assert.deepEqual(middle.rect,{x:305,y:371,width:55,height:201});assert.ok(contains(middle.rect,crouch));assert.ok(contains(middle.rect,upright));
 });
 test('edges translate an intact crop rather than squeezing it',()=>{
  for(const b of [box({x:0}),box({x:.94}),box({y:0}),box({y:.9})]){
@@ -92,7 +92,9 @@ test('initial measured velocity keeps a fast rider through a short detection gap
  const result=planSubjectCrops(items,{width:1280,height:720});
  assert.equal(result.frames[3].source,'detected');
  assert.equal(result.frames[4].source,'detected');
- assert.equal(result.frames[2].source,'full'); // Wide gap union gains too little to crop safely.
+ assert.equal(result.frames[2].source,'interpolated');
+ assert.ok(contains(result.frames[2].rect,items[1].detections[0],{width:1280,height:720}));
+ assert.ok(contains(result.frames[2].rect,items[3].detections[0],{width:1280,height:720}));
  for(const i of [3,4])assert.ok(contains(result.frames[i].rect,items[i].detections[0],{width:1280,height:720}));
 });
 
@@ -136,4 +138,30 @@ test('dense timestamps and repeated decoded boxes do not erase rider velocity',(
  assert.ok(result.stats.detected>=20);
  assert.equal(result.frames.at(-1).source,'detected');
  assert.ok(result.frames.at(-1).rect);
+});
+
+test('an early broken track cannot concentrate sampling while later person detections remain',()=>{
+ const items=[obs(.1,[box({x:.1,w:.15,h:.3})]),obs(.3,[box({x:.11,w:.15,h:.3})]),obs(.5,[box({x:.12,w:.15,h:.3})]),
+  obs(1,[box({x:.65,w:.08,h:.2})]),obs(1.2,[box({x:.66,w:.08,h:.2})]),obs(1.4,[box({x:.67,w:.08,h:.2})]),obs(2.5,[box({x:.7,w:.08,h:.15})])];
+ assert.equal(estimateSubjectWindow(items,{duration:4}),null,'the clip-wide fallback must retain later motion after identity continuity is lost');
+});
+
+test('one transient partial box can recover against a recent reliable box without changing identity',()=>{
+ const rows=[
+  [.377,.001389,.282031,.2375,.449219,.613281],
+  [.499,.077778,.297656,.251389,.407031,.59375],
+  [.621,.148611,.319531,.256944,.3625,.546875],
+  [.866,.327778,.363281,.15,.207813,.5],
+  [.988,.125,.270313,.356944,.449219,.65625],
+  [1.111,.106944,.205469,.393056,.523438,.816406],
+  [1.233,.141667,.21875,.355556,.475,.816406],
+ ];
+ const items=rows.map(([time,x,y,w,h,score])=>obs(time,[{x,y,w,h,score}]));
+ const result=planSubjectCrops(items,{width:720,height:1280});
+ assert.equal(result.stats.detected,rows.length);
+});
+test('partial-box recovery cannot replace a rider with a much larger foreground person',()=>{
+ const p=plan([obs(0),obs(.1),obs(.2,[box({x:.46,y:.32,w:.035,h:.055})]),
+  obs(.3,[box({x:.39,y:.19,w:.25,h:.65})])]);
+ assert.equal(p.frames.at(-1).source,'full');
 });

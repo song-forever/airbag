@@ -1,7 +1,7 @@
 import { deriveRecognizedAction } from './action-recognition.js?v=0.11.0';
-import { DEFAULT_MODEL, getModel } from './model-catalog.js';
+import { DEFAULT_MODEL, getModel } from './model-catalog.js?v=0.13.1';
 import { MAX_ANALYSIS_FRAMES } from './frame-sampling.js';
-export { DEFAULT_MODEL } from './model-catalog.js';
+export { DEFAULT_MODEL } from './model-catalog.js?v=0.13.1';
 /**
  * Browser-only Qwen client for a static HTTPS site.
  * The key is sent directly to the fixed official endpoint, never to the site host.
@@ -146,11 +146,12 @@ const SYSTEM_PROMPT = `你是一位表达简洁、观察谨慎的单板滑雪气
 {"stages":[{"phase":"助滑","analysis":"可见动作；有依据时谨慎解释可能含义","time":null},{"phase":"上台","analysis":"可见动作；有依据时谨慎解释可能含义","time":null},{"phase":"起跳","analysis":"可见动作；有依据时谨慎解释可能含义","time":null},{"phase":"腾空","analysis":"可见动作；有依据时谨慎解释可能含义","time":null}],"nextJump":{"instruction":"下一跳只执行的一项调整，或继续保持的一项有效动作，用一句话表达","reason":"结合可见动作，用一两句话解释为什么优先选择这一点，不夸大效果","check":"下一跳回放中可直接观察、用于判断同一项调整是否做到的一个标准","time":null},"followUp":null}
 手动模式提供上一跳重点时，followUp 必须改为 {"status":"done 或 partial 或 not_yet 或 uncertain","observation":"本跳对照原 check 的可见表现，不超过 400 字","time":null}。只填写当前画面中的观察，不能把待核对的指令当作已观察到的事实。
 stages 必须包含上述四个阶段且按此顺序，每阶段一至两句，有内容才展开，不为字数凑内容。没有依据判断某个阶段时，只写“本阶段不作动作判断”，不评论视频或要求补拍。instruction、reason、check 必须是非空字符串；总体分析简洁，不设最低字数。所有 time 可为一个已提供的图片时间戳，或 null；它只用于回看定位，不标记出发或落地。不要输出打分、限制说明或其他建议。`;
-const AUTO_ACTION_PROMPT = `本次是自动识别动作模式，没有用户指定的目标动作。先独立观察本跳的转体与抓板特征，再依组合表复盘；上一跳类别和建议不是本跳动作的证据。只识别实际可见表现，不能推断用户原本想做却未完成的技巧。
+const AUTO_ACTION_PROMPT = `本次是自动识别动作模式，没有用户指定的目标动作。先独立观察本跳的转体与抓板特征，再依组合表复盘；转体指人和雪板相对于场景的整体朝向改变，身体与雪板彼此协调、相对姿态不变并不能说明没有转体。上一跳类别和建议不是本跳动作的证据。只识别实际可见表现，不能推断用户原本想做却未完成的技巧。
 必须在同一次请求的 JSON 中增加 recognizedAction，格式为 {"rotation":{"state":"yes 或 no 或 uncertain","evidence":[{"time":0,"observation":"该时刻实际可见的身体与雪板表现"}]},"grab":{"state":"yes 或 no 或 uncertain","evidence":[{"time":0,"observation":"该时刻实际可见的手与雪板关系"}]},"otherAction":null}。不要直接返回 type、description、置信度或自行选择最终标签，最终类型由程序组合。
-转体 rotation=yes：至少两个不同时刻的可见画面，支持腾空过程中身体与雪板的整体朝向绕竖直方向发生转动，并与离台前后的可见朝向对照。单帧侧身、摆臂、拧肩、板头抬起或下压、人在画面中变斜、透视变化，均不能单独证明转体。rotation=no 也必须引用至少两个不同时刻中身体与雪板整体朝向保持稳定的可见依据；仅仅没有发现转体，不足以判 no。无法确认时用 uncertain，不根据上一跳推断。不得要求落地证据，不能仅凭不完整动作猜测精确转体角度或抓板名称；明确可见时才可在阶段观察中描述，不把不完整转体自动理解为某个目标角度的失败。
+识别转体不要求起跳前存在预摆、拧转蓄力或主动发力，也不要求完成某个指定角度。主动技巧或自然调整属于原因和意图；只要确有身体与雪板共同绕竖直方向的整体转向证据，就不能因为它看起来像自然调整、没有主动预转或不是完整一圈而排除转体。
+转体 rotation=yes：至少两个不同时刻的可见画面，支持腾空过程中身体与雪板的整体朝向绕竖直方向发生转动，并与离台前后的可见朝向对照。单帧侧身、摆臂、拧肩、板头抬起或下压、人在画面中变斜、透视变化，均不能单独证明转体。rotation=no 必须依时间顺序检查腾空早、中、晚的整体朝向，并引用至少三个实际提供的时刻作为稳定依据；不能只对比起始和结束两帧，因为整圈转体的首尾朝向可能相同。先依真实时间顺序检查所有可见腾空帧，观察身体正面/背面和雪板长轴朝向的变化，再作整体结论；若中间朝向无法确认，返回 uncertain。如果中间存在可见的连续转向，不能被首尾相同抵消。仅仅没有发现转体，不足以判 no。无法确认时用 uncertain，不根据上一跳推断。不得要求落地证据，不能仅凭不完整动作猜测精确转体角度或抓板名称；明确可见时才可在阶段观察中描述，不把不完整转体自动理解为某个目标角度的失败。
 抓板 grab=yes：至少一张画面中明确可见手与雪板建立抓握接触，手靠近板、弯腰或收腿不能单独证明抓板。grab=no：至少两个不同时刻明确可见手与板分离的依据。无法确认接触关系时用 uncertain，不能因没有看到抓握就默认 no。
-每个属性的 evidence 只引用实际提供的帧，按时间严格递增且不重复；通常每项引用两帧，最多四帧。每条 observation 用简短一句话描述本帧看见什么，不超过 160 字，不用类别名称代替观察，不捏造帧间动作。time 必须是输入已有时间戳；不能编造引用。uncertain 可以没有证据。只有明确看到不属于直飞、抓板、转体、转体抓板的其他动作时，otherAction 才填写 {"evidence":[{"time":0,"observation":"该时刻可见的其他动作表现"}]}，至少两帧，遵守相同引用规则；通常为 null。无法确认不是其他动作。
+每个属性的 evidence 只引用实际提供的帧，按时间严格递增且不重复；证据数量遵守各属性的判断要求，每项最多四帧。每条 observation 用简短一句话描述本帧看见什么，不超过 160 字，不用类别名称代替观察，不捏造帧间动作。time 必须是输入已有时间戳；不能编造引用。uncertain 可以没有证据。只有明确看到不属于直飞、抓板、转体、转体抓板的其他动作时，otherAction 才填写 {"evidence":[{"time":0,"observation":"该时刻可见的其他动作表现"}]}，至少两帧，遵守相同引用规则；通常为 null。无法确认不是其他动作。
 组合表：rotation=no 且 grab=no → 直飞；no/yes → 抓板；yes/no → 转体；yes/yes → 转体抓板；任一 uncertain → 无法判断；其他明确动作有独立依据 → 其他。四阶段分析、followUp 和 nextJump 必须依据这同一组合结果，不能与自己给出的特征相矛盾。类型未确认时，不把转体或抓板当成已确认事实安排纠正，也不以分类未知为用户的动作错误。
 自动模式按以下规则衔接上一跳重点：没有上一跳重点时 followUp 为 null，针对本跳选一个建议。组合后的类型与上一跳 actionType 都属于直飞、抓板、转体、转体抓板且相同时，才对照原 check 返回四状态 followUp；未确认完成时继续原 instruction 和 check，done 时可以巩固或选择一个新重点。两者都属于这四类但不同时，followUp 返回 null，针对当前动作选择一个重点，不把旧动作的标准用于当前动作。如果任一类型为其他、无法判断或上一跳未注明类型，则 followUp 返回 uncertain，说明暂不能确认是否适用，并继续保留原重点及检查标准，不据此判为未做到。不声称看过上一跳视频，不推断用户的练习意图，不把动作类型变化当作进步或退步。`;
 
@@ -174,7 +175,7 @@ function makeProviderPayload(payload) {
   };
   if (payload.samplingMetadata && payload.actionMode === 'auto') request.messages[0].content += `\n自动模式的最终对象必须同时包含 stages、nextJump、followUp 和 recognizedAction 四个字段，不得只返回识别属性。四阶段与总体建议仍须完整返回。
 抓板可能只持续很短时间。判断 grab=no 时须检查腾空前、中、后的手板关系并引用至少三个实际提供的时刻；不能只凭起跳前后或腾空早晚手与板分离，排除中段短暂抓板。如果中段存在手靠近板但接触无法确认的时刻，grab 必须为 uncertain；不能把没有确认抓握写成没有抓握。只有明确可见手对板的抓握接触，才为 yes。
-跨帧持续可见的服装图案或标记可辅助比较整体朝向，但仅在确实能辨别时使用，不编造标记。头盔侧面和肩臂摆动不能单独证明正面、背面转换。
+跨帧持续可见的服装图案或标记可辅助比较整体朝向，但仅在确实能辨别时使用，不编造标记。同一服装图案仍然可见，不等于身体与雪板整体朝向保持不变；不能据少数时刻的图案可见性声称整个腾空过程中始终同向。头盔侧面和肩臂摆动不能单独证明正面、背面转换。
 下一跳建议仅调整或保持本跳已经观察到的动作，不主动新增尚未出现的技巧，不把一次观察解释为具备安全进阶条件。类型尚未确认时围绕可见基础动作给一个建议，不安排未经确认的转体或抓板纠正。`;
   if (typeof config.thinking === 'boolean' && !config.thinking) request.enable_thinking = false;
   if (config.minimax) request.thinking = { type: 'disabled' };

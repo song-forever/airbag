@@ -1,17 +1,19 @@
-import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.12.0';
+import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.13.1';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.12.0';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.12.5';
 import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
-import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js';
-import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.12.0';
+import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js?v=0.13.1';
+import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.13.1';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
 import { JumpTracker } from './tracker.js?v=6764207';
+import { createSettingsStore, isValidApiKey } from './settings-store.js?v=0.13.1';
 const $ = (id) => document.getElementById(id);
 const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map(el => [el.id, el]));
 const comparison = new ComparisonPlayer({elements:ui,createElement:tag=>document.createElement(tag)});
-let apiKey = '', autoAnalyze = false, model = DEFAULT_MODEL;
+const settingsStore=createSettingsStore({getStorage:()=>localStorage,appPath:new URL('./',import.meta.url).pathname});
+let {apiKey,autoAnalyze,model,persisted:settingsPersisted}=settingsStore.snapshot();
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let analysisDetector=null,analysisDetectorPromise=null;
 let detectionActive=false;
@@ -101,8 +103,27 @@ function populateModels() {
  ui.modelSelect.value=model;updateModelHint();
 }
 function showSettings() {ui.apiKeyInput.value=apiKey;ui.autoAnalyzeInput.checked=autoAnalyze;ui.modelSelect.value=model;updateModelHint();ui.settingsDialog.showModal();}
+function renderSettingsStatus(){
+ ui.analysisPrivacy.textContent=apiKey?'已连接百炼模型 · '+(settingsPersisted?'密钥已保存在本机':'密钥暂留本次页面')+(autoAnalyze?' · 已允许每跳自动分析':''):'仅将抽取画面发送到百炼模型；需要填写自己的 API Key。';
+ ui.settingsSaveHint.textContent=settingsPersisted?'密钥、模型和自动分析设置会自动保存在此浏览器，下次打开自动恢复。':'本机存储不可用：当前设置仍可使用，但刷新后可能无法恢复。';
+}
+function saveSettings(patch){
+ const result=settingsStore.update(patch);
+ ({apiKey,autoAnalyze,model,persisted:settingsPersisted}=result);
+ renderSettingsStatus();return result;
+}
 populateModels();
-ui.modelSelect.onchange=updateModelHint;
+renderSettingsStatus();
+ui.apiKeyInput.oninput=()=>{
+ saveSettings({apiKey:ui.apiKeyInput.value});
+ ui.autoAnalyzeInput.checked=autoAnalyze;
+};
+ui.modelSelect.onchange=()=>{updateModelHint();if(getModel(ui.modelSelect.value))saveSettings({model:ui.modelSelect.value});};
+ui.autoAnalyzeInput.onchange=()=>{
+ const value=ui.apiKeyInput.value.trim();
+ if(ui.autoAnalyzeInput.checked&&!isValidApiKey(value)){ui.autoAnalyzeInput.checked=false;toast('开启自动分析前，请先填写完整的 API Key。');return;}
+ saveSettings({apiKey:value,autoAnalyze:ui.autoAnalyzeInput.checked});
+};
 const dbPromise = new Promise((resolve,reject)=>{
  if(!('indexedDB' in window)){reject(new Error('本机不支持本地记录'));return;}
  const req=indexedDB.open('airbag-journal-v1',1);
@@ -551,15 +572,14 @@ ui.settingsBtn.onclick=showSettings;ui.howBtn.onclick=()=>ui.helpDialog.showModa
 document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>$(btn.dataset.close).close());
 ui.settingsForm.onsubmit=e=>{
  e.preventDefault();const value=ui.apiKeyInput.value.trim();
- if(value&&(/[\s\r\n]/.test(value)||value.length<16)){toast('请填写完整的百炼 API Key。');return;}
+ if(value&&!isValidApiKey(value)){toast('请填写完整的百炼 API Key。');return;}
  if(ui.autoAnalyzeInput.checked&&!value){toast('开启自动分析前，请先填写 API Key。');return;}
  const selectedModel=ui.modelSelect.value;
  if(!getModel(selectedModel)){ui.modelValidation.textContent='请选择免费额度清单中筛选出的视频理解模型。';ui.modelValidation.hidden=false;return;}
- apiKey=value;autoAnalyze=ui.autoAnalyzeInput.checked;model=selectedModel;ui.apiKeyInput.value='';ui.settingsDialog.close();
- ui.analysisPrivacy.textContent=apiKey?'已连接百炼模型 · 密钥仅本次打开有效'+(autoAnalyze?' · 已允许每跳自动分析':''):'仅将抽取画面发送到百炼模型；需要填写自己的 API Key。';
- toast(apiKey?'本次设置已保存。':'本地回放模式，无需百炼模型 Key。');
+ saveSettings({apiKey:value,autoAnalyze:ui.autoAnalyzeInput.checked,model:selectedModel});ui.apiKeyInput.value='';ui.settingsDialog.close();
+ toast(settingsPersisted?(apiKey?'设置已自动保存在本机。':'本地回放模式，无需百炼模型 Key。'):'本机存储不可用，设置暂留当前页面。');
 };
-ui.clearKeyBtn.onclick=()=>{apiKey='';autoAnalyze=false;ui.apiKeyInput.value='';ui.autoAnalyzeInput.checked=false;toast('密钥已清除，自动分析已关闭。');};
+ui.clearKeyBtn.onclick=()=>{saveSettings({apiKey:''});ui.apiKeyInput.value='';ui.autoAnalyzeInput.checked=false;toast(settingsPersisted?'密钥已从本机清除，自动分析已关闭。':'当前页面密钥已清除，自动分析已关闭；本机存储不可用，请清理网站数据以确保旧密钥删除。');};
 function setReviewSpeed(speed){
  ui.reviewVideo.playbackRate=speed;comparison.setPlaybackRate(speed);
  document.querySelectorAll('[data-speed]').forEach(button=>{const selected=Number(button.dataset.speed)===speed;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));});
@@ -598,7 +618,7 @@ ui.deleteClipBtn.onclick=async()=>{
  renderHistory();
 };
 document.addEventListener('visibilitychange',()=>{if(document.hidden){comparison.pause();releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');else closeCamera();}else if(keepScreenAwake)keepAwake();});
-window.addEventListener('pagehide',()=>{comparison.close();apiKey='';releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
+window.addEventListener('pagehide',()=>{comparison.close();releaseAwake();detectionActive=false;if(armed)finishCapture('interrupted');if(stream&&!armed)closeCamera();});
 window.addEventListener('pageshow',()=>{if(keepScreenAwake&&!document.hidden)keepAwake();});
 window.addEventListener('beforeunload',event=>{if(armed||analysisBusy){event.preventDefault();event.returnValue='';}});
 window.addEventListener('unhandledrejection',event=>{console.warn('An operation could not complete.');});

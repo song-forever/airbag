@@ -1,7 +1,7 @@
 // Video-analysis choices selected from the supplied free-quota model IDs.
 // No account balance, usage or expiry information is stored here.
 export const CATALOG_DATE = '2026-10-21';
-export const DEFAULT_MODEL = 'qwen3.7-plus';
+export const DEFAULT_MODEL = 'qwen3.8-max';
 export const VIDEO_MODELS = Object.freeze([
   {
     "id": "qwen3.7-plus",

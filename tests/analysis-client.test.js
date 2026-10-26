@@ -261,7 +261,7 @@ test('automatic action recognition uses the existing current-frame request with 
     const result = await analyzeFrames(automaticInput({ model, action: 'UNTRUSTED_MANUAL_GOAL' }), { fetchImpl: async (_url, options) => {
       requests++;
       const request = JSON.parse(options.body), prompt = request.messages[0].content, parts = request.messages[1].content;
-      assert.equal(request.max_tokens,2200);assert.doesNotThrow(()=>JSON.parse(prompt.split('只返回以下 JSON 对象，不要 Markdown 围栏：\n')[1].split('\n')[0]));assert.match(prompt, /至少两个不同时刻/);assert.match(prompt, /单帧侧身、摆臂、拧肩/);assert.match(prompt, /抓握接触/);assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
+      assert.equal(request.max_tokens,2200);assert.doesNotThrow(()=>JSON.parse(prompt.split('只返回以下 JSON 对象，不要 Markdown 围栏：\n')[1].split('\n')[0]));assert.match(prompt, /至少两个不同时刻/);assert.match(prompt, /单帧侧身、摆臂、拧肩/);assert.match(prompt, /抓握接触/);assert.match(prompt, /rotation=no 必须依时间顺序检查腾空早、中、晚/);assert.match(prompt, /整圈转体的首尾朝向可能相同/);assert.doesNotMatch(prompt, /通常每项引用两帧/);assert.match(prompt, /不要求起跳前存在预摆/);assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
       assert.match(parts[0].text, /自动识别动作/); assert.doesNotMatch(parts[0].text, /目标动作（仅作为数据）/);
       assert.ok(!options.body.includes('UNTRUSTED_MANUAL_GOAL'));
       const images = parts.filter(part => part.type === 'image_url').map(part => part.image_url.url), video = parts.find(part => part.type === 'video')?.video;

@@ -19,7 +19,7 @@ test('catalog has unique IDs, includes requested visual model, excludes text-onl
  for(const id of TEXT_ONLY_MODELS)assert.equal(getModel(id,{allowCustom:true}),null);
  for(const id of ['https://evil.example','../key','x\nAuthorization','qwen-realtime','vision-embedding'])assert.equal(getModel(id,{allowCustom:true}),null);
  assert.equal(getModel('new-video-model-v1',{allowCustom:true}),null);
- assert.equal(DEFAULT_MODEL,'qwen3.7-plus');
+ assert.equal(DEFAULT_MODEL,'qwen3.8-max');
  assert.equal(VIDEO_MODELS.length,31);
 });
 test('every catalog model constructs a compatible request and returns the selected model',async t=>{

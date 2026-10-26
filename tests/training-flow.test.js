@@ -25,7 +25,7 @@ function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysi
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
 async function settleUntil(predicate){for(let i=0;i<60&&!predicate();i++)await Promise.resolve();assert.ok(predicate(),'expected analysis pipeline boundary');}
-function fixture(){
+function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}}}={}){
  const htmlWrites=[];
  class Element extends EventTarget{
   constructor(id=''){super();this.id=id;this.children=[];this._text='';this.hidden=false;this.disabled=false;this.value='';this.dataset={};this.style={};this.checked=false;this.paused=true;this.readyState=2;this.seeking=false;this.classList={add(){},remove(){},toggle(){}};}
@@ -41,7 +41,7 @@ function fixture(){
  document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-speed]'?speeds:[];
  const window=new EventTarget();window.scrollTo=()=>{};
  const events=[],requests=[],saved=[];let timerId=0;
- const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:{getItem:()=>null,setItem(){}},confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
+ const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:storage,confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
  if(imported.getTrainingContext)globals.getTrainingContext=(...args)=>{events.push('context');return imported.getTrainingContext(...args);};
  const context=vm.createContext(globals);
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nconst originalExtractor=extractFrames;this.testAPI={
@@ -49,7 +49,7 @@ function fixture(){
   setup:(items,selected)=>{records=items;current=selected;apiKey='sk-local-test-only';autoAnalyze=true;},
   provider:fn=>{analyzeFrames=fn;}, extractor:fn=>{extractFrames=fn;},
   replaceHistory:items=>{records=items;},snapshot:()=>({current,records,analysisBusy}),
-  save:fn=>{persistRecord=fn;}
+  save:fn=>{persistRecord=fn;},settings:()=>({apiKey,autoAnalyze,model})
   ,realExtractor:(record,signal)=>originalExtractor(record,signal)
   ,reader:fn=>{openVideoReader=fn;}
   ,localDetector:fn=>{loadAnalysisDetector=fn;analysisDetector=null;analysisDetectorPromise=null;}
@@ -61,6 +61,39 @@ function fixture(){
  api.save(async record=>{events.push('persist');saved.push(structuredClone(record));return true;});
  return {api,nodes,speeds,events,requests,saved,htmlWrites};
 }
+
+function settingsStorage(){const values=new Map();return {values,getItem:name=>values.get(name)??null,setItem:(name,value)=>values.set(name,value),removeItem:name=>values.delete(name)};}
+test('setting controls automatically save without submitting, restore on reopen and delete an emptied key',()=>{
+ const storage=settingsStorage(),f=fixture({storage}),key='sk-local-test-only-not-a-real-key';
+ f.nodes.settingsBtn.onclick();f.nodes.apiKeyInput.value=key;f.nodes.apiKeyInput.oninput();
+ f.nodes.modelSelect.value='qwen3-vl-plus';f.nodes.modelSelect.onchange();
+ f.nodes.autoAnalyzeInput.checked=true;f.nodes.autoAnalyzeInput.onchange();
+ const reopened=fixture({storage});reopened.nodes.settingsBtn.onclick();
+ assert.equal(reopened.nodes.apiKeyInput.value,key);assert.equal(reopened.nodes.modelSelect.value,'qwen3-vl-plus');assert.equal(reopened.nodes.autoAnalyzeInput.checked,true);
+ assert.ok(reopened.nodes.analysisPrivacy.textContent.includes('密钥已保存在本机'));
+ reopened.nodes.apiKeyInput.value='';reopened.nodes.apiKeyInput.oninput();
+ assert.equal(reopened.nodes.autoAnalyzeInput.checked,false);
+ const cleared=fixture({storage});cleared.nodes.settingsBtn.onclick();
+ assert.equal(cleared.nodes.apiKeyInput.value,'');assert.equal(cleared.nodes.modelSelect.value,'qwen3-vl-plus');assert.equal(cleared.nodes.autoAnalyzeInput.checked,false);
+ assert.equal(f.requests.length,0);assert.equal(reopened.requests.length,0);
+});
+
+test('the existing save and clear controls persist settings while partial key edits do not replace a valid key',()=>{
+ const storage=settingsStorage(),f=fixture({storage}),key='sk-local-test-only-not-a-real-key';
+ f.nodes.settingsBtn.onclick();f.nodes.apiKeyInput.value=key;f.nodes.modelSelect.value='qwen3-vl-plus';f.nodes.autoAnalyzeInput.checked=true;
+ f.nodes.settingsForm.onsubmit({preventDefault(){}});
+ f.nodes.settingsBtn.onclick();f.nodes.apiKeyInput.value='sk-incomplete';f.nodes.apiKeyInput.oninput();
+ const unchanged=fixture({storage});unchanged.nodes.settingsBtn.onclick();assert.equal(unchanged.nodes.apiKeyInput.value,key);
+ f.nodes.clearKeyBtn.onclick();const cleared=fixture({storage});cleared.nodes.settingsBtn.onclick();
+ assert.equal(cleared.nodes.apiKeyInput.value,'');assert.equal(cleared.nodes.modelSelect.value,'qwen3-vl-plus');assert.equal(cleared.nodes.autoAnalyzeInput.checked,false);
+});
+
+test('unwritable settings storage displays the limitation and still accepts settings for this page',()=>{
+ const storage={getItem(){throw new Error('Storage disabled');},setItem(){throw new Error('Storage disabled');},removeItem(){throw new Error('Storage disabled');}};
+ const f=fixture({storage});f.nodes.settingsBtn.onclick();f.nodes.apiKeyInput.value='sk-local-test-only-not-a-real-key';f.nodes.apiKeyInput.oninput();
+ assert.equal(f.api.settings().apiKey,'sk-local-test-only-not-a-real-key');assert.ok(f.nodes.settingsSaveHint.textContent.includes('本机存储不可用'));
+ f.nodes.clearKeyBtn.onclick();assert.equal(f.api.settings().apiKey,'');assert.equal(f.api.settings().autoAnalyze,false);
+});
 
 test('a camera clip with a confirmed start still initializes its separate analysis detector',async()=>{
  const f=fixture(),current=clip('camera',1000);current.contentStartConfirmed=true;
