@@ -266,7 +266,7 @@ function detectFrameChange(video) {
  const gray=new Uint8Array(pixels.length/4);
  for(let i=0,j=0;i<pixels.length;i+=4,j++)gray[j]=(pixels[i]*77+pixels[i+1]*150+pixels[i+2]*29)>>8;
  const now=performance.now();
- motionState=motionDetector.update(gray,now,{learning:armed&&departureAt===null&&now-armedAt<2000});return motionState.moving;
+ motionState=motionDetector.update(gray,now,{learning:armed&&departureAt===null&&now-armedAt<2000});return motionState.moving&&motionState.changedRatio>=.05;
 }
 function startMotionRecording(detections) {
  const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
@@ -284,13 +284,12 @@ function startMotionRecording(detections) {
 }
 async function armCapture() {
  if(armed||processing||finishing||analysisBusy)return;
- const clickedAt=performance.now();
  processing=true;ui.armBtn.disabled=true;ui.armLabel.textContent='正在准备…';setCaptureControls(false);
  try{
   await openCamera();
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
-  recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=clickedAt;discardCapture=false;finishing=false;pendingReason='';
+  recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
   armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();motionDetector.reset();motionState=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
   // Person detection helps follow the attempt, but must not block motion start.
   loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
@@ -318,7 +317,7 @@ function detectLoop() {
   if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，等待画面稳定 · 尚未录像';
   if(video.readyState>=2&&video.videoWidth&&!zoomSettling){
    const now=performance.now(),changed=detectFrameChange(video);
-   // Starting is deliberately sensitive; completion ignores tiny pixel noise.
+   // Departure requires five-percent change; completion retains its separate lower threshold.
    const completionMotion=motionState?.completionMoving??(motionState?.changedRatio>=.002);
    if(completionMotion){
     lastMotionAt=now;
@@ -331,7 +330,7 @@ function detectLoop() {
    }catch{/* Motion detection continues if person inference fails. */}}
    if(armed&&departureAt===null){
     const warmingUp=now-armedAt<2000;
-    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待持续运动';
+    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待 5% 持续变化';
     if(!warmingUp&&changed){
      if(motionSince===null)motionSince=now;
      if(now-motionSince>=350){

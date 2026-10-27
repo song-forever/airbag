@@ -268,14 +268,14 @@ test('resumed substantial motion cancels a pending quiet-scene finish',async()=>
 
 const tickMotionFrame=(f,time,frame)=>{f.setNow(time);f.setFrame(rgba(frame));f.api.detectLoop();};
 const tickCaptureClock=f=>[...f.timers.values()].find(item=>item.kind==='interval').fn();
-test('a tiny rider emerging from an occluder preserves the 2s warmup, 350ms confirmation and edge exclusion',async()=>{
+test('tiny riders and edge-only changes remain below the five-percent start threshold',async()=>{
  const edge=fixture();edge.setFrame(rgba(scene()));await edge.api.armCapture();
  // All four edge patches remain outside the 10% central motion area.
  for(const [i,box] of [{x:2,y:40,w:5,h:8},{x:153,y:40,w:5,h:8},{x:80,y:1,w:5,h:5},{x:80,y:84,w:5,h:5}].entries())tickMotionFrame(edge,3000+i*180,scene({edgePatch:box}));
  assert.equal(edge.recorders.length,0,'edge-only changes must not arm a recorder');
  edge.api.finishCapture('manual',true);
  const f=fixture();f.setNow(5000);f.setFrame(rgba(scene()));await f.api.armCapture();
- // A 3×7 subject occupies 0.15% of the buffer, far below the former 5% gate.
+ // A 3×7 subject occupies 0.15% of the buffer, far below the restored 5% gate.
  // It is initially hidden behind x=80, then increasingly visible.
  const rider=x=>scene({rider:{x,y:54,w:3,h:7,value:20},clipX:80});
  for(const [time,x] of [[5100,79],[5280,82],[5460,85],[5640,88],[6999,91]])tickMotionFrame(f,time,rider(x));
@@ -283,8 +283,8 @@ test('a tiny rider emerging from an occluder preserves the 2s warmup, 350ms conf
  assert.equal(f.api.snapshot().motionSince,null);
  tickMotionFrame(f,7000,rider(94));assert.equal(f.recorders.length,0);
  tickMotionFrame(f,7180,rider(97));assert.equal(f.recorders.length,0);
- tickMotionFrame(f,7350,rider(100));assert.equal(f.recorders.length,1,'350ms of local movement starts recording');
- f.api.finishCapture('manual',true);await f.recorders[0].onstop();
+ tickMotionFrame(f,7350,rider(100));assert.equal(f.recorders.length,0,'continuous tiny motion must not pass the new area threshold');
+ assert.equal(f.api.snapshot().motionSince,null);f.api.finishCapture('manual',true);
 });
 
 test('subpixel background jitter after a rider disappears allows 1s quiet + 3s tail, with 6s total minimum',async()=>{
@@ -308,4 +308,37 @@ test('subpixel background jitter after a rider disappears allows 1s quiet + 3s t
   tickMotionFrame(f,expectedEnd,scene({dx:.2,dy:-.2}));tickCaptureClock(f);assert.equal(f.recorders[0].state,'inactive');
   await f.recorders[0].onstop();assert.equal(f.api.snapshot().detectionActive,true);
  }
+});
+
+test('departure requires at least five-percent motion and a fresh 350ms confirmation after a dip',async()=>{
+ const f=fixture();await f.api.armCapture();
+ const signal=ratio=>f.api.setMotionSignal({moving:true,ready:true,cameraMoving:false,changedRatio:ratio});
+ signal(.0499);for(const now of [3000,4000,5000]){f.setNow(now);f.api.detectLoop();}
+ assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().motionSince,null);
+ signal(.05);f.setNow(5100);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ signal(.0499);f.setNow(5300);f.api.detectLoop();assert.equal(f.api.snapshot().motionSince,null);
+ signal(.05);f.setNow(5400);f.api.detectLoop();f.setNow(5749);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ f.setNow(5750);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ f.api.finishCapture('manual',true);await f.recorders[0].onstop();
+});
+
+test('stationary-scene illumination flicker must not create a recording',async()=>{
+ const f=fixture(),still=scene();f.setFrame(rgba(still));await f.api.armCapture();
+ for(const [time,lit]of [[3100,true],[3280,false],[3460,true]]){
+  const frame=new Uint8Array(still);if(lit)for(let x=55;x<58;x++)frame[35*160+x]+=36;
+  tickMotionFrame(f,time,frame);
+ }
+ assert.equal(f.recorders.length,0,'three adjacent flickering pixels in a stationary scene must not start recording');
+ f.api.finishCapture('manual',true);
+});
+
+test('waiting for camera permission cannot consume the two-second motion warmup',async()=>{
+ const request=deferred();let calls=0;const f=fixture({getUserMedia:()=>{calls++;return request.promise;}});
+ f.api.setMotion(true);const arming=f.api.armCapture();await settleUntil(()=>calls===1);
+ f.setNow(10000);request.resolve(fakeStream());await arming;
+ for(const now of [10350,11999]){f.setNow(now);f.api.detectLoop();assert.equal(f.recorders.length,0,'camera startup still needs its full warmup');}
+ assert.equal(f.api.snapshot().motionSince,null);
+ f.setNow(12000);f.api.detectLoop();f.setNow(12349);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ f.setNow(12350);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ f.api.finishCapture('manual',true);await f.recorders[0].onstop();
 });
