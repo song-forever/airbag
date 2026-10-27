@@ -10,7 +10,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <title>跃练 · 每一跳，都看得见</title>
-<link rel="stylesheet" href="./style.css?v=0.13.2">
+<link rel="stylesheet" href="./style.css?v=0.13.3">
 </head>
 <body>
 <div class="app-shell">
@@ -19,7 +19,7 @@
 <button class="icon-button" id="settingsBtn" aria-label="分析设置"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 17h16M8 4v6m8 4v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
 </header>
 <main>
-<section class="intro"><div><p class="eyebrow">YOUR NEXT GOOD JUMP</p><h1>每一跳，<br class="mobile-break">都看得见。</h1><p class="subtitle">拍下来，慢一点看，再进步一点。</p></div><div class="session-marker"><span class="signal-dot"></span> 本机训练记录<small>第一轮 · 现场测试</small></div></section>
+<section class="intro"><div><p class="eyebrow">YOUR NEXT GOOD JUMP</p><h1>每一跳，<br class="mobile-break">都看得见。</h1></div><div class="session-marker"><span class="signal-dot"></span> 本机训练记录<small>第一轮 · 现场测试</small></div></section>
 <nav class="view-tabs" aria-label="训练页面"><button class="tab active" id="captureTab">拍摄一跳</button><button class="tab" id="reviewTab">回放与分析 <span id="reviewCount" class="count">0</span></button></nav>
 <section id="captureView" class="view">
 <div class="capture-layout">
@@ -39,8 +39,6 @@
 <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="captureStatus" role="status">摄像头尚未开启</span><button class="text-button" id="closeCameraBtn" hidden>关闭相机</button></div>
 </div>
 <aside class="control-column">
-<div class="action-card automatic-card"><div class="section-label"><span>01 / 动作识别</span><span class="beta-tag">自动识别</span></div><div class="automatic-symbols" aria-hidden="true">↗ · ⌁ · ↻</div><h2>直接拍，不用选动作</h2><p>分析时自动识别直飞、抓板、转体或组合动作，并衔接上次的训练重点。</p></div>
-<div class="ready-card"><div class="section-label"><span>02 / 准备出发</span><span class="beta-tag">自动检测 · 测试中</span></div><p>点击准备后只开始侦测，画面稳定后，确认约 5% 的持续局部运动才录像。侦测不会超时退出；录像结束后保留气垫画面，并继续常亮回看。</p><p class="micro-note" id="armedNote">不需要标区域 · 请保持屏幕解锁、页面在前台</p></div>
 <button class="import-card" id="importBtn"><span class="import-icon">↥</span><span><strong>也可以导入已有视频</strong><small>从相册或“文件”选择一跳</small></span><span class="arrow">↗</span></button><input type="file" id="fileInput" accept="video/*,.mov,.mp4,.m4v" hidden>
 </aside></div>
 <div class="session-footer"><span><i class="small-lock"></i> 视频保存在当前设备</span><span>只分析助滑、起跳与腾空</span><button class="text-button" id="howBtn">使用说明 ↗</button></div>
@@ -69,10 +67,10 @@
 <div class="history-heading"><h3>逐跳记录 <span id="historyTotal"></span></h3><span>保存在这台设备的浏览器中</span></div><div class="history-list" id="historyList"></div>
 </div></section>
 </main>
-<footer class="site-footer"><span>跃练 <span class="muted">/ 每一跳，都有下一步。</span></span><span>EARLY ACCESS · 0.13.2</span></footer>
+<footer class="site-footer"><span>跃练 <span class="muted">/ 每一跳，都有下一步。</span></span><span>EARLY ACCESS · 0.13.3</span></footer>
 </div>
 <dialog id="settingsDialog"><form id="settingsForm"><div class="dialog-heading"><div><p class="eyebrow">ANALYSIS SETTINGS</p><h2>选择分析模型</h2></div><button class="icon-button" type="button" data-close="settingsDialog" aria-label="关闭">×</button></div><p class="dialog-copy">使用阿里云百炼北京地域的 API Key。密钥和设置自动保存在本机浏览器，刷新或重新打开会自动恢复。</p><label for="apiKeyInput">百炼 API Key</label><input type="password" id="apiKeyInput" autocomplete="off" spellcheck="false" placeholder="sk-… 或 st-…" maxlength="256"><p class="micro-note">网页直接连接阿里云，不经过中转服务。密钥保存在本机 localStorage，不写入视频历史或分析报告；点击“清除密钥”即可删除。</p><label for="modelSelect">分析模型</label><select id="modelSelect" aria-describedby="modelHint modelCatalogInfo"><option value="qwen3.8-max">qwen3.8-max · 推荐</option></select><p class="micro-note" id="modelCatalogInfo"></p><p class="micro-note" id="modelHint"></p><p class="inline-error" id="modelValidation" role="alert" hidden></p><p class="micro-note">列表来自你提供的免费额度清单，当前余额和有效期仍以百炼控制台为准。请保留对应模型的“免费额度用完即停”设置。</p><label class="check-label"><input type="checkbox" id="autoAnalyzeInput"><span>录像结束后自动分析<small>开启后，每跳会自动发送抽取画面给百炼模型，并产生 API 费用。具体费用以实际用量为准。</small></span></label><div class="settings-info">本地拍摄与回看不需要 API Key。自动检测在手机运行，不持续上传摄像头画面。</div><p class="micro-note" id="settingsSaveHint" role="status"></p><div class="dialog-actions"><button class="button ghost" type="button" id="clearKeyBtn">清除密钥</button><button class="button primary" type="submit">保存设置</button></div><a class="external-link" href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">前往阿里云百炼获取 Key ↗</a></form></dialog>
 <dialog id="helpDialog"><div class="dialog-heading"><div><p class="eyebrow">QUICK START</p><h2>让每一跳，完整留下</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭">×</button></div><ol class="help-list"><li><strong>固定手机</strong><p>使用出发点后方机位，尽量完整拍到人和板。手机不要跟拍。相机开启后，点击取景画面右下角的倍率展开变焦，再次点击或点画面空白处收起。录像中也能调整；可用范围由手机提供。</p></li><li><strong>直接点击开始探测</strong><p>人物检测资源首次加载需要时间。点击后仅侦测画面变化，检测到出发才启动录像；不需要等待人物锁定或手动画区域。</p></li><li><strong>回来直接回看</strong><p>录像至少 10 秒，并额外保留结束后的 3 秒气垫画面。拍完后摄像头和侦测继续开启，点击准备下一跳可再次录像；手动停止侦测或关闭相机才退出。</p></li><li><strong>按需接入百炼模型</strong><p>在设置中填写自己的 Key、开启自动分析。分析在本机估计重点区间，前后稀疏取帧、重点区间密集取帧，最多 96 张；自动裁剪人物附近，定位不可靠时保留全画面。只发送这一组带时间戳图片，进行一次模型分析。无需选择或输入目标动作。模型分别判断转体和抓板，程序根据引用的画面组合类别；可展开识别依据并回看对应画面。依据不足时保留无法判断。识别到动作类型变化后重新选择重点，暂时无法判断时保留原重点。本地导入的视频按导入顺序衔接。回放默认原速 1×。本机已有同类动作分析后，可打开“两跳对比”；双方都有时间依据的阶段可以按参考点对齐回看，整跳各自从片段起点播放。对比使用本机视频，不增加模型调用。微步按钮按 1/60 秒移动，不同帧率可能出现重复画面。</p></li></ol><div class="settings-info">请保持屏幕解锁、页面在前台。切换应用或锁屏会中断本次拍摄。自动检测仍需现场验证；视频保存在浏览器，清理网站数据会删除记录，重要视频请另行下载。</div><button class="button primary full" data-close="helpDialog">知道了，准备出发</button></dialog>
 <div class="toast" id="toast" role="status" hidden></div>
-<script type="module" src="./app.js?v=0.13.2"></script>
+<script type="module" src="./app.js?v=0.13.3"></script>
 </body></html>
