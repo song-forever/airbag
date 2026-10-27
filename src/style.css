@@ -20,3 +20,7 @@
 @media(max-width:620px){.comparison-section{padding:15px 13px;border-radius:13px}.comparison-heading h3{font-size:14px}.comparison-heading>.button{font-size:11px;padding:9px 10px}.comparison-stage{padding:10px 11px}.comparison-players.comparing{gap:8px}.comparison-players.comparing video{height:300px;max-height:44vh}.comparison-caption{font-size:9px;min-height:30px}}
 
 #actionEvidencePanel{margin-top:12px;border-top:1px solid #d7dfd0;padding-top:12px;font-size:11px;color:#536c57}#actionEvidencePanel summary{cursor:pointer;padding:6px 0}.recognition-evidence{padding:12px 0;border-bottom:1px solid #dce3d6}.recognition-evidence:last-child{border-bottom:0}.recognition-evidence strong{font-size:11px;font-weight:550}.recognition-evidence p{font-size:11px;line-height:1.8;color:#64755d;margin:8px 0}.recognition-evidence .time-link{min-height:36px;padding:8px 10px}
+
+/* Keep navigation clear of the brand header after removing the intro. */
+.view-tabs{margin-top:24px;padding-top:2px;gap:28px}.tab{padding:10px 1px 15px;min-height:48px;display:inline-flex;align-items:center;gap:8px;line-height:1.4}.tab .count{margin-left:0}
+@media(max-width:620px){.view-tabs{margin-top:18px;padding-top:0;gap:28px;margin-bottom:18px}.tab{padding:10px 1px 14px;min-height:44px}}
