@@ -33,9 +33,11 @@ let zoomQuietUntil=0;
 const cameraZoom=new CameraZoom({onChange:renderCameraZoom,onTransition:resetMotionForZoom});
 function renderCameraZoom(state){
  ui.cameraZoom.hidden=!stream||!state.supported;ui.zoomUnavailable.hidden=!stream||state.supported;
+ if(ui.cameraZoom.hidden)ui.cameraZoom.open=false;
  ui.zoomError.hidden=!state.error;ui.zoomError.textContent=state.error;
  if(!state.supported)return;
  const label=value=>Number(value.toFixed(2))+'×';
+ ui.zoomSummaryValue.textContent=label(state.value);ui.zoomToggle.setAttribute('aria-label','相机变焦，当前'+label(state.value));
  ui.zoomValue.textContent=label(state.value);ui.zoomRange.min=state.min;ui.zoomRange.max=state.max;ui.zoomRange.step=state.step;ui.zoomRange.value=state.value;
  ui.zoomRange.setAttribute('aria-valuetext',label(state.value));ui.cameraZoom.setAttribute('aria-busy',String(state.busy));
  ui.zoomPresets.replaceChildren();
@@ -50,6 +52,12 @@ function resetMotionForZoom(){
  }
 }
 ui.zoomRange.oninput=()=>cameraZoom.set(Number(ui.zoomRange.value));
+document.addEventListener('pointerdown',event=>{
+ if(ui.cameraZoom.open&&!ui.cameraZoom.contains(event.target))ui.cameraZoom.open=false;
+});
+ui.cameraZoom.addEventListener('keydown',event=>{
+ if(event.key==='Escape'&&ui.cameraZoom.open){event.preventDefault();ui.cameraZoom.open=false;ui.zoomToggle.focus();}
+});
 const formatTime = (t) => Number.isFinite(t) ? Math.floor(t/60).toString().padStart(2,'0') + ':' + Math.floor(t%60).toString().padStart(2,'0') : '00:00';
 const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 const reasons = {
