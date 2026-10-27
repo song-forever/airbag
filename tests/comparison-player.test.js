@@ -7,7 +7,7 @@ function clip(id,createdAt,{type='直飞',start=1,end=7,phaseTime=2,prior=null}=
   trainingContext:{previousFocus:prior},analysis:{analysis:{schemaVersion:5,recognizedAction:{type},stages:[{phase:'起跳',time:phaseTime}]}}};
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
-function fixture(){
+function fixture({toggle=true}={}){
  class Element extends EventTarget{
   constructor(){super();this.children=[];this.dataset={};this.hidden=false;this.disabled=false;this.currentTime=0;this.readyState=2;this.seeking=false;this.playbackRate=1;this.paused=true;this.pauseCalls=0;this.playCalls=0;this.loads=0;this.classes=new Set();this.classList={toggle:(name,enabled)=>{if(enabled)this.classes.add(name);else this.classes.delete(name);}};this.ownerDocument={createElement:()=>new Element()};}
   append(...children){this.children.push(...children);}replaceChildren(...children){this.children=children;}
@@ -17,6 +17,7 @@ function fixture(){
  }
  const ids=['compareSection','compareToggleBtn','compareHint','compareControls','compareStages','compareCue','comparePlaybackBtn','comparePrevious','comparePreviousVideo','comparePreviousLabel','compareCurrentLabel','comparisonPlayers','reviewVideo','loopBtn'];
  const ui=Object.fromEntries(ids.map(id=>[id,new Element()])),created=[],revoked=[];
+ if(!toggle)delete ui.compareToggleBtn;
  const timers=new Map();let timerId=0;
  const player=new ComparisonPlayer({setTimer:fn=>{const id=++timerId;timers.set(id,fn);return id;},clearTimer:id=>timers.delete(id),elements:ui,createElement:()=>new Element(),createObjectURL:blob=>{const url='blob:comparison-'+created.length;created.push({blob,url});return url;},revokeObjectURL:url=>revoked.push(url)});
  return {ui,player,created,revoked,timers};
@@ -110,4 +111,9 @@ test('timed-out or failed comparison preparation leaves native players available
  player.close();player.open();ui.comparePreviousVideo.readyState=0;
  ui.compareStages.children[0].onclick();ui.comparePreviousVideo.error={code:3};ui.comparePreviousVideo.dispatchEvent(new Event('error'));
  assert.match(ui.compareHint.textContent,/切换阶段重试/);assert.equal(timers.size,0);
+});
+
+test('external settings can control comparison without a per-page toggle button',()=>{
+ const {player,ui,revoked}=fixture({toggle:false}),previous=clip('external-prev',1000),current=clip('external-current',2000);
+ player.render(current,[current,previous]);player.open();assert.equal(player.active,true);assert.equal(ui.comparePrevious.hidden,false);player.close();assert.equal(ui.comparePrevious.hidden,true);assert.equal(revoked.length,1);
 });

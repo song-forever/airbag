@@ -46,7 +46,7 @@ function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}}}={}){
  const context=vm.createContext(globals);
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nconst originalExtractor=extractFrames;this.testAPI={
   analyzeCurrent,selectRecord,renderAnalysis,
-  setup:(items,selected)=>{records=items;current=selected;apiKey='sk-local-test-only';autoAnalyze=true;},
+  setup:(items,selected)=>{records=items;current=selected;saveSettings({apiKey:'sk-local-test-only',autoAnalyze:true});},
   provider:fn=>{analyzeFrames=fn;}, extractor:fn=>{extractFrames=fn;},
   replaceHistory:items=>{records=items;},snapshot:()=>({current,records,analysisBusy}),
   save:fn=>{persistRecord=fn;},settings:()=>({apiKey,autoAnalyze,model})
@@ -230,7 +230,7 @@ test('two-jump comparison opens locally, shares speed controls and resets both U
  current.analysis.analysis.stages.forEach((stage,index)=>stage.time=index+1);
  f.api.setup([next,current,previous],current);await f.api.selectRecord(current);
  assert.equal(f.nodes.reviewVideo.playbackRate,1);assert.equal(f.speeds[2]['aria-pressed'],'true');assert.equal(f.speeds[1]['aria-pressed'],'false');
- assert.equal(f.nodes.compareToggleBtn.disabled,false);f.nodes.compareToggleBtn.onclick();
+ assert.equal(f.nodes.compareToggleBtn,undefined);assert.equal(f.nodes.compareSection.hidden,true);f.nodes.comparePreviousInput.checked=true;f.nodes.comparePreviousInput.onchange();
  assert.equal(f.nodes.comparePrevious.hidden,false);assert.equal(f.nodes.compareControls.hidden,false);assert.equal(f.nodes.loopBtn.disabled,true);
  assert.ok(f.nodes.compareCue.textContent.includes('这一跳对应的旧重点'));
  const takeoff=f.nodes.compareStages.children.find(button=>button.textContent==='起跳');takeoff.onclick();
@@ -238,7 +238,7 @@ test('two-jump comparison opens locally, shares speed controls and resets both U
  f.speeds[1].onclick();assert.equal(f.nodes.reviewVideo.playbackRate,.5);assert.equal(f.nodes.comparePreviousVideo.playbackRate,.5);
  await f.api.selectRecord(next);
  assert.equal(f.nodes.reviewVideo.playbackRate,1);assert.equal(f.nodes.comparePreviousVideo.playbackRate,1);assert.equal(f.speeds[2]['aria-pressed'],'true');
- assert.equal(f.nodes.comparePrevious.hidden,true);assert.equal(f.nodes.loopBtn.disabled,false);assert.equal(f.requests.length,0,'local comparison must not make a model request');
+ assert.equal(f.nodes.comparePrevious.hidden,false);assert.equal(f.nodes.loopBtn.disabled,true);f.nodes.comparePreviousInput.checked=false;f.nodes.comparePreviousInput.onchange();assert.equal(f.nodes.comparePrevious.hidden,true);assert.equal(f.nodes.compareSection.hidden,true);assert.equal(f.nodes.loopBtn.disabled,false);assert.equal(f.requests.length,0,'local comparison must not make a model request');
 });
 
 
@@ -252,21 +252,27 @@ test('schema 6 reports render derived recognition evidence as text and preserve 
  current.analysis=report({schemaVersion:5});await f.api.selectRecord(current);assert.equal(f.nodes.actionEvidencePanel.hidden,true);
 });
 
-test('attention belongs to its video and its analysis snapshot without changing prior training context',async()=>{
- const first=clip('first-attention',1000),second=clip('second-attention',2000),f=fixture();
- first.attention='旧视频的观察主题';f.api.setup([second,first],second);await f.api.selectRecord(second);
- assert.equal(f.nodes.jumpAttentionInput.value,'');f.nodes.jumpAttentionInput.value='  留意起跳时有没有提前转肩  ';f.nodes.jumpAttentionInput.oninput();await f.nodes.jumpAttentionInput.onchange();
- assert.equal(second.attention,'  留意起跳时有没有提前转肩  ');
- await f.api.analyzeCurrent();assert.equal(f.requests[0].attention,'留意起跳时有没有提前转肩');assert.equal(second.analysis.attention,'留意起跳时有没有提前转肩');assert.equal(second.analysis.analysis.stages.length,4);
- f.nodes.jumpAttentionInput.value='改看抓板';f.nodes.jumpAttentionInput.oninput();assert.equal(second.analysis.attention,'留意起跳时有没有提前转肩');
- await f.api.selectRecord(first);assert.equal(f.nodes.jumpAttentionInput.value,'旧视频的观察主题');await f.api.selectRecord(second);assert.equal(f.nodes.jumpAttentionInput.value,'改看抓板');
- assert.equal(f.nodes.jumpAttentionInput.disabled,false);
+test('attention persists across videos and reloads until explicitly changed or cleared',async()=>{
+ const storage=settingsStorage(),first=clip('first-attention',1000),second=clip('second-attention',2000),f=fixture({storage});first.attention='旧视频的观察主题';f.api.setup([second,first],second);await f.api.selectRecord(second);
+ f.nodes.jumpAttentionInput.value='  持续留意提前转肩  ';f.nodes.jumpAttentionInput.oninput();await f.nodes.jumpAttentionInput.onchange();
+ await f.api.analyzeCurrent();assert.equal(f.requests[0].attention,'持续留意提前转肩');assert.equal(second.analysis.attention,'持续留意提前转肩');
+ await f.api.selectRecord(first);assert.equal(f.nodes.jumpAttentionInput.value,'  持续留意提前转肩  ');await f.api.analyzeCurrent();assert.equal(f.requests[1].attention,'持续留意提前转肩');
+ f.nodes.jumpAttentionInput.value='改看抓板';f.nodes.jumpAttentionInput.oninput();assert.equal(second.analysis.attention,'持续留意提前转肩');
+ const reopened=fixture({storage});reopened.api.setup([second,first],second);await reopened.api.selectRecord(second);assert.equal(reopened.nodes.jumpAttentionInput.value,'改看抓板');
+ reopened.nodes.jumpAttentionInput.value='';reopened.nodes.jumpAttentionInput.oninput();const cleared=fixture({storage});cleared.api.setup([first],first);await cleared.api.selectRecord(first);assert.equal(cleared.nodes.jumpAttentionInput.value,'');
 });
 
 test('attention is frozen while analysis is running and restored after extraction fails',async()=>{
- const current=clip('attention-freeze',1000),f=fixture(),gate=deferred();current.attention='关注本跳舒展';f.api.setup([current],current);await f.api.selectRecord(current);f.api.extractor(()=>gate.promise);
+ const current=clip('attention-freeze',1000),f=fixture(),gate=deferred();current.attention='关注本跳舒展';f.api.setup([current],current);await f.api.selectRecord(current);f.nodes.jumpAttentionInput.value='关注本跳舒展';f.nodes.jumpAttentionInput.oninput();f.api.extractor(()=>gate.promise);
  const pending=f.api.analyzeCurrent();await settleUntil(()=>f.api.snapshot().analysisBusy);assert.equal(f.nodes.jumpAttentionInput.disabled,true);
  f.nodes.jumpAttentionInput.value='分析期间改动';f.nodes.jumpAttentionInput.oninput();assert.equal(current.attention,'关注本跳舒展');gate.resolve(preparedFrames);await pending;
  assert.equal(f.requests[0].attention,'关注本跳舒展');assert.equal(current.analysis.attention,'关注本跳舒展');assert.equal(f.nodes.jumpAttentionInput.disabled,false);
  f.api.extractor(async()=>{throw Error('提取失败');});await f.api.analyzeCurrent();assert.equal(f.nodes.jumpAttentionInput.disabled,false);assert.equal(current.analysis.attention,'关注本跳舒展');
+});
+
+test('comparison preference restores independently of model credentials and opens without a page toggle',async()=>{
+ const storage=settingsStorage(),f=fixture({storage});f.nodes.comparePreviousInput.checked=true;f.nodes.comparePreviousInput.onchange();
+ const reopened=fixture({storage}),previous=clip('compare-prev',1000,{analysis:report({follow:null})}),current=clip('compare-current',2000,{analysis:report()});
+ reopened.api.setup([current,previous],current);await reopened.api.selectRecord(current);assert.equal(reopened.nodes.comparePreviousInput.checked,true);assert.equal(reopened.nodes.comparePrevious.hidden,false);assert.equal(reopened.nodes.compareToggleBtn,undefined);
+ reopened.nodes.comparePreviousInput.checked=false;reopened.nodes.comparePreviousInput.onchange();assert.equal(reopened.nodes.comparePrevious.hidden,true);const off=fixture({storage});assert.equal(off.nodes.comparePreviousInput.checked,false);
 });

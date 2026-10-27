@@ -5,7 +5,7 @@ export class ComparisonPlayer {
  constructor({elements,createElement=tag=>elements.compareStages.ownerDocument.createElement(tag),createObjectURL=blob=>URL.createObjectURL(blob),revokeObjectURL=url=>URL.revokeObjectURL(url),setTimer=(...args)=>setTimeout(...args),clearTimer=id=>clearTimeout(id)}){
   this.ui=elements;this.createElement=createElement;this.createObjectURL=createObjectURL;this.revokeObjectURL=revokeObjectURL;this.setTimer=setTimer;this.clearTimer=clearTimer;
   this.active=false;this.generation=0;this.preparation=null;this.ready=false;this.url=null;this.current=null;this.previous=null;this.segment=null;this.playing=false;this.pairedPlayback=false;
-  elements.compareToggleBtn.onclick=()=>this.active?this.close():this.open();
+  if(elements.compareToggleBtn)elements.compareToggleBtn.onclick=()=>this.active?this.close():this.open();
   elements.comparePlaybackBtn.onclick=()=>this.togglePlayback();
   for(const video of [elements.reviewVideo,elements.comparePreviousVideo]){
    video.addEventListener('timeupdate',()=>this.boundPlayback(video));
@@ -16,7 +16,7 @@ export class ComparisonPlayer {
  }
  render(current,records){
   this.close();this.current=current;this.previous=findComparisonRecord(current,records);this.segments=this.previous?getComparisonSegments(current,this.previous):[];
-  const ui=this.ui;ui.compareSection.hidden=!current;ui.compareToggleBtn.disabled=!this.previous||!this.segments.length;
+  const ui=this.ui;ui.compareSection.hidden=!current;if(ui.compareToggleBtn)ui.compareToggleBtn.disabled=!this.previous||!this.segments.length;
   this.readyHint=this.previous?'已找到最近一跳同类动作，可并排回看。':'完成两跳同类动作的分析后，即可在这里对比；旧视频可重新分析。';
   ui.compareHint.textContent=this.readyHint;
  }
@@ -36,7 +36,7 @@ export class ComparisonPlayer {
   this.active=false;this.segment=null;this.ready=false;this.playing=false;this.pairedPlayback=false;
   const ui=this.ui;
   ui.compareControls.hidden=true;ui.comparePrevious.hidden=true;ui.compareCurrentLabel.hidden=true;
-  ui.comparisonPlayers.classList.toggle('comparing',false);ui.compareToggleBtn.textContent='对比上一跳';ui.compareToggleBtn.setAttribute('aria-expanded','false');
+  ui.comparisonPlayers.classList.toggle('comparing',false);if(ui.compareToggleBtn){ui.compareToggleBtn.textContent='对比上一跳';ui.compareToggleBtn.setAttribute('aria-expanded','false');}
   ui.compareStages.replaceChildren();ui.compareCue.hidden=true;ui.compareCue.textContent='';
   if(ui.loopBtn)ui.loopBtn.disabled=false;
   if(this.url){ui.comparePreviousVideo.removeAttribute('src');ui.comparePreviousVideo.load();this.revokeObjectURL(this.url);this.url=null;}
@@ -48,7 +48,7 @@ export class ComparisonPlayer {
   try{this.url=this.createObjectURL(this.previous.blob);}catch{ui.compareHint.textContent='未能打开上一跳视频，请重新选择本跳后重试。';return;}
   this.active=true;ui.reviewVideo.pause();ui.comparePreviousVideo.src=this.url;this.setPlaybackRate(ui.reviewVideo.playbackRate||1);
   ui.compareControls.hidden=false;ui.comparePrevious.hidden=false;ui.compareCurrentLabel.hidden=false;
-  ui.comparisonPlayers.classList.toggle('comparing',true);ui.compareToggleBtn.textContent='收起对比';ui.compareToggleBtn.setAttribute('aria-expanded','true');
+  ui.comparisonPlayers.classList.toggle('comparing',true);if(ui.compareToggleBtn){ui.compareToggleBtn.textContent='收起对比';ui.compareToggleBtn.setAttribute('aria-expanded','true');}
   if(ui.loopBtn)ui.loopBtn.disabled=true;
   const type=this.previous.analysis.analysis.recognizedAction.type;
   ui.comparePreviousLabel.textContent='上一跳同类 · '+type+' · '+new Date(this.previous.createdAt).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
