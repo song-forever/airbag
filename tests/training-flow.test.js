@@ -251,3 +251,22 @@ test('schema 6 reports render derived recognition evidence as text and preserve 
  const evidenceButton=f.nodes.actionEvidenceList.children[0].children.find(child=>child.className==='time-link');evidenceButton.onclick();assert.equal(f.nodes.reviewVideo.currentTime,.2);
  current.analysis=report({schemaVersion:5});await f.api.selectRecord(current);assert.equal(f.nodes.actionEvidencePanel.hidden,true);
 });
+
+test('attention belongs to its video and its analysis snapshot without changing prior training context',async()=>{
+ const first=clip('first-attention',1000),second=clip('second-attention',2000),f=fixture();
+ first.attention='旧视频的观察主题';f.api.setup([second,first],second);await f.api.selectRecord(second);
+ assert.equal(f.nodes.jumpAttentionInput.value,'');f.nodes.jumpAttentionInput.value='  留意起跳时有没有提前转肩  ';f.nodes.jumpAttentionInput.oninput();await f.nodes.jumpAttentionInput.onchange();
+ assert.equal(second.attention,'  留意起跳时有没有提前转肩  ');
+ await f.api.analyzeCurrent();assert.equal(f.requests[0].attention,'留意起跳时有没有提前转肩');assert.equal(second.analysis.attention,'留意起跳时有没有提前转肩');assert.equal(second.analysis.analysis.stages.length,4);
+ f.nodes.jumpAttentionInput.value='改看抓板';f.nodes.jumpAttentionInput.oninput();assert.equal(second.analysis.attention,'留意起跳时有没有提前转肩');
+ await f.api.selectRecord(first);assert.equal(f.nodes.jumpAttentionInput.value,'旧视频的观察主题');await f.api.selectRecord(second);assert.equal(f.nodes.jumpAttentionInput.value,'改看抓板');
+ assert.equal(f.nodes.jumpAttentionInput.disabled,false);
+});
+
+test('attention is frozen while analysis is running and restored after extraction fails',async()=>{
+ const current=clip('attention-freeze',1000),f=fixture(),gate=deferred();current.attention='关注本跳舒展';f.api.setup([current],current);await f.api.selectRecord(current);f.api.extractor(()=>gate.promise);
+ const pending=f.api.analyzeCurrent();await settleUntil(()=>f.api.snapshot().analysisBusy);assert.equal(f.nodes.jumpAttentionInput.disabled,true);
+ f.nodes.jumpAttentionInput.value='分析期间改动';f.nodes.jumpAttentionInput.oninput();assert.equal(current.attention,'关注本跳舒展');gate.resolve(preparedFrames);await pending;
+ assert.equal(f.requests[0].attention,'关注本跳舒展');assert.equal(current.analysis.attention,'关注本跳舒展');assert.equal(f.nodes.jumpAttentionInput.disabled,false);
+ f.api.extractor(async()=>{throw Error('提取失败');});await f.api.analyzeCurrent();assert.equal(f.nodes.jumpAttentionInput.disabled,false);assert.equal(current.analysis.attention,'关注本跳舒展');
+});

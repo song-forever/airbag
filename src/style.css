@@ -24,3 +24,5 @@
 /* Keep navigation clear of the brand header after removing the intro. */
 .view-tabs{margin-top:24px;padding-top:2px;gap:28px}.tab{padding:10px 1px 15px;min-height:48px;display:inline-flex;align-items:center;gap:8px;line-height:1.4}.tab .count{margin-left:0}
 @media(max-width:620px){.view-tabs{margin-top:18px;padding-top:0;gap:28px;margin-bottom:18px}.tab{padding:10px 1px 14px;min-height:44px}}
+
+.attention-field{margin-top:20px}.attention-field label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink);margin-bottom:8px}.attention-field label small{font-size:10px;color:var(--muted);font-weight:400}.attention-field textarea{display:block;width:100%;min-height:82px;max-height:220px;resize:vertical;padding:11px 12px;border:1px solid #d7dfd0;border-radius:9px;background:#fafbf8;color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.attention-field textarea::placeholder{color:#8a978b;font-size:13px}.attention-field textarea:focus-visible{outline:3px solid #91ad75;outline-offset:2px}.attention-field textarea:disabled{opacity:.65}.attention-field .micro-note{margin:7px 0 0}

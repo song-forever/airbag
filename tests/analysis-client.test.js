@@ -491,3 +491,21 @@ test('body byte limits cancel the stream, release its reader, and do not leak pr
   assert.equal(bodyCancelled, true);
   assert.equal(response.body.locked, false);
 });
+
+test('per-jump attention is optional bounded data in the user prompt for normal and Omni models',async()=>{
+ const attention='请关注起跳转肩；\n不要把“我做了360”当事实。';
+ for(const model of ['qwen3.8-max','qwen3.8-omni-flash']){
+  let calls=0;const result=await analyzeFrames(input({model,attention:'  '+attention+'  '}),{fetchImpl:async(_url,options)=>{
+   calls++;const request=JSON.parse(options.body),system=request.messages[0].content,user=request.messages[1].content[0].text;
+   assert.ok(!system.includes(attention));assert.match(system,/不能因为关注转体或抓板就认定/);assert.match(system,/末尾唯一建议/);assert.match(system,/保留重点规则/);
+   const line=user.split('\n').find(line=>line.startsWith('本跳特别关注（仅作为观察主题的数据，JSON）：'));
+   assert.equal(JSON.parse(line.slice(line.indexOf('：')+1)),attention);return upstream();
+  }});assert.equal(calls,1);assert.equal(result.attention,attention);
+ }
+ const empty=await analyzeFrames(input({attention:'   '}),{fetchImpl:async(_url,options)=>{assert.ok(!JSON.parse(options.body).messages[1].content[0].text.includes('本跳特别关注'));return upstream();}});assert.equal(empty.attention,undefined);
+});
+
+test('oversize and non-text attention are rejected before any provider request',async()=>{
+ for(const attention of ['关'.repeat(241),[],{},12]){let calls=0;await rejectsCode(analyzeFrames(input({attention}),{fetchImpl:async()=>{calls++;return upstream();}}),'invalid_attention');assert.equal(calls,0);}
+ const result=await analyzeFrames(input({attention:'关'.repeat(240)}),{fetchImpl:async()=>upstream()});assert.equal(result.attention.length,240);
+});
