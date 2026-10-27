@@ -250,13 +250,13 @@ test('significant continuing motion prevents a quiet-scene finish',async()=>{
  assert.equal(f.api.snapshot().autoFinishAt,null);
 });
 
-test('quiet-scene finish can be queued early but never stops before ten seconds',async()=>{
+test('quiet-scene finish can be queued early but never stops before six seconds',async()=>{
  const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotion(false);
  f.setNow(1999);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,null);
- f.setNow(2000);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,11000);
+ f.setNow(2000);f.api.detectLoop();assert.equal(f.api.snapshot().autoFinishAt,7000);
  const tick=[...f.timers.values()].find(item=>item.kind==='interval').fn;
- f.setNow(10999);tick();assert.equal(f.recorders[0].state,'recording');
- f.setNow(11000);tick();assert.equal(f.recorders[0].state,'inactive');
+ f.setNow(6999);tick();assert.equal(f.recorders[0].state,'recording');
+ f.setNow(7000);tick();assert.equal(f.recorders[0].state,'inactive');
 });
 test('resumed substantial motion cancels a pending quiet-scene finish',async()=>{
  const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);f.api.setMotion(false);
@@ -287,7 +287,7 @@ test('a tiny rider emerging from an occluder preserves the 2s warmup, 350ms conf
  f.api.finishCapture('manual',true);await f.recorders[0].onstop();
 });
 
-test('subpixel background jitter after a rider disappears allows 1s quiet + 3s tail, with 10s total minimum',async()=>{
+test('subpixel background jitter after a rider disappears allows 1s quiet + 3s tail, with 6s total minimum',async()=>{
  for(const lastMovementAt of [1000,12000]){
   const f=fixture();f.setFrame(rgba(scene()));await f.api.armCapture();f.api.startMotionRecording([]);
   // Stationary visible people are irrelevant to the quiet-scene stop decision.
@@ -302,8 +302,8 @@ test('subpixel background jitter after a rider disappears allows 1s quiet + 3s t
   }
   tickMotionFrame(f,lastMovementAt+999,scene());assert.equal(f.api.snapshot().autoFinishAt,null);
   tickMotionFrame(f,lastMovementAt+1000,scene({dx:.3,dy:.2}));
-  const expectedEnd=Math.max(11000,lastMovementAt+4000);
-  assert.equal(f.api.snapshot().autoFinishAt,expectedEnd,'queue after 1s; retain 3s tail and 10s minimum');
+  const expectedEnd=Math.max(7000,lastMovementAt+4000);
+  assert.equal(f.api.snapshot().autoFinishAt,expectedEnd,'queue after 1s; retain 3s tail and 6s minimum');
   tickMotionFrame(f,expectedEnd-1,scene({dx:-.25,dy:-.15}));tickCaptureClock(f);assert.equal(f.recorders[0].state,'recording');
   tickMotionFrame(f,expectedEnd,scene({dx:.2,dy:-.2}));tickCaptureClock(f);assert.equal(f.recorders[0].state,'inactive');
   await f.recorders[0].onstop();assert.equal(f.api.snapshot().detectionActive,true);

@@ -22,7 +22,7 @@ let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, 
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
 let cameraOpenPromise=null,cameraGeneration=0;
 let analysisController = null, analysisBusy = false, analysisRun = 0;
-const MIN_RECORDING_MS=10000,MAX_RECORDING_MS=45000,END_TAIL_MS=3000;
+const MIN_RECORDING_MS=6000,MAX_RECORDING_MS=45000,END_TAIL_MS=3000;
 let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
 let tracker = new JumpTracker({maxDurationMs:MAX_RECORDING_MS, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
 const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
@@ -280,7 +280,7 @@ function startMotionRecording(detections) {
  departureAt=recordingStart;lastMotionAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
  setCaptureControls(true);ui.stopBtn.textContent='■ 结束并保存';
  ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');
- ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';status('已检测到画面运动，开始录像');
+ ui.cameraHint.textContent='正在录像 · 自动结束最短 6 秒';status('已检测到画面运动，开始录像');
 }
 async function armCapture() {
  if(armed||processing||finishing||analysisBusy)return;
@@ -322,7 +322,7 @@ function detectLoop() {
    const completionMotion=motionState?.completionMoving??(motionState?.changedRatio>=.002);
    if(completionMotion){
     lastMotionAt=now;
-    if(autoFinishReason==='motion_finished'){autoFinishAt=null;autoFinishReason='';ui.cameraHint.textContent='正在录像 · 自动结束最短 10 秒';}
+    if(autoFinishReason==='motion_finished'){autoFinishAt=null;autoFinishReason='';ui.cameraHint.textContent='正在录像 · 自动结束最短 6 秒';}
    }
    let detections=[];
    if(detector&&!analysisBusy&&!finishing){try{
