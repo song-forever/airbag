@@ -15,3 +15,14 @@ export function makeVideoFile(record,{FileImpl=File}={}){
 export function canShareVideo(file,navigatorImpl=navigator){
  try{return typeof navigatorImpl.share==='function'&&typeof navigatorImpl.canShare==='function'&&navigatorImpl.canShare({files:[file]});}catch{return false;}
 }
+
+export function hasVideo(record){return record?.blob instanceof Blob&&record.blob.size>0;}
+export async function exportVideoBatch(records,{navigatorImpl=navigator,confirmSaved=()=>false,clearVideos=async()=>{}}={}){
+ if(!records.length||records.some(record=>!hasVideo(record)))throw new Error('请选择仍保存在本机的视频。');
+ const files=records.map((record,index)=>{const file=makeVideoFile(record);return new File([file],String(index+1).padStart(3,'0')+'-'+file.name,{type:file.type});});
+ if(typeof navigatorImpl.share!=='function'||!navigatorImpl.canShare?.({files}))throw new Error('当前浏览器无法一次保存这些视频，请减少选择数量，或使用 iPhone Safari。');
+ await navigatorImpl.share({files,title:'跃练批量视频'});
+ if(!await confirmSaved())return {exported:records.length,cleared:0};
+ await clearVideos(records);
+ return {exported:records.length,cleared:records.length};
+}

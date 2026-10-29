@@ -276,3 +276,11 @@ test('comparison preference restores independently of model credentials and open
  reopened.api.setup([current,previous],current);await reopened.api.selectRecord(current);assert.equal(reopened.nodes.comparePreviousInput.checked,true);assert.equal(reopened.nodes.comparePrevious.hidden,false);assert.equal(reopened.nodes.compareToggleBtn,undefined);
  reopened.nodes.comparePreviousInput.checked=false;reopened.nodes.comparePreviousInput.onchange();assert.equal(reopened.nodes.comparePrevious.hidden,true);const off=fixture({storage});assert.equal(off.nodes.comparePreviousInput.checked,false);
 });
+
+test('cleared video records retain reports while playback, trimming and new analysis are unavailable',async()=>{
+ const f=fixture(),item=clip('archived',1,{analysis:report()});item.blob=null;item.videoClearedAt=123;f.api.setup([item],item);
+ await f.api.selectRecord(item);
+ assert.equal(f.nodes.reviewVideo.hidden,true);assert.equal(f.nodes.analyzeBtn.disabled,true);assert.equal(f.nodes.applyTrimBtn.disabled,true);assert.equal(f.nodes.shareVideoBtn.disabled,true);assert.equal(f.nodes.exportReportBtn.disabled,false);
+ assert.match(f.nodes.historyList.textContent,/视频已清理/);assert.equal(f.nodes.batchExportBtn.disabled,true);
+ await f.api.analyzeCurrent();assert.equal(f.requests.length,0);assert.ok(item.analysis);
+});

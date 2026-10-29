@@ -3,7 +3,7 @@ import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.13.9';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
 import { FrameMotionDetector } from './motion-detector.js?v=0.12.5';
-import { makeVideoFile, canShareVideo } from './video-export.js?v=0.5.5';
+import { makeVideoFile, canShareVideo, hasVideo, exportVideoBatch } from './video-export.js?v=0.14.0';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js?v=0.13.1';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.13.8';
 import { openVideoReader, seekVideoFrame } from './video-reader.js?v=0.5.4';
@@ -16,7 +16,7 @@ const settingsStore=createSettingsStore({getStorage:()=>localStorage,appPath:new
 let {apiKey,autoAnalyze,model,attention,comparePrevious,persisted:settingsPersisted}=settingsStore.snapshot();
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let analysisDetector=null,analysisDetectorPromise=null;
-let detectionActive=false;
+let detectionActive=false,batchExportBusy=false;
 let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
@@ -145,7 +145,7 @@ async function dbOp(mode,fn) {
  const db=await dbPromise;
  return new Promise((resolve,reject)=>{
   const tx=db.transaction('clips',mode), store=tx.objectStore('clips');let result;
-  try {const req=fn(store);req.onsuccess=()=>result=req.result;}catch(err){reject(err);return;}
+  try {const req=fn(store);req.onsuccess=()=>result=req.result;}catch(err){tx.abort();reject(err);return;}
   tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
  });
 }
@@ -416,38 +416,38 @@ async function importVideo(file) {
 async function selectRecord(record,{internal=false}={}) {
  if(armed||(!internal&&(processing||finishing))){toast('请先完成当前拍摄或保存。');return;}
  if(analysisBusy){toast('请先等待或取消当前分析，再切换视频。');return;}
- comparison.close();current=record;if(currentUrl)URL.revokeObjectURL(currentUrl);currentUrl=URL.createObjectURL(record.blob);
- ui.reviewVideo.src=currentUrl;setReviewSpeed(1);ui.reviewVideo.loop=false;
+ comparison.close();current=record;if(currentUrl)URL.revokeObjectURL(currentUrl);currentUrl=hasVideo(record)?URL.createObjectURL(record.blob):null;
+ if(currentUrl)ui.reviewVideo.src=currentUrl;else{ui.reviewVideo.removeAttribute('src');ui.reviewVideo.load();}setReviewSpeed(1);ui.reviewVideo.loop=false;
  ui.reviewVideo.onloadedmetadata=()=>{ui.reviewVideo.currentTime=record.trimStart;};
  ui.reviewEmpty.hidden=true;ui.reviewContent.hidden=false;
  updateRecognizedAction(record);ui.clipSource.textContent=(record.source==='camera'?'现场拍摄':'本地导入')+' / '+new Date(record.createdAt).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
- ui.clipMeta.textContent=record.duration.toFixed(1)+' 秒 · '+(record.width?record.width+' × '+record.height+' · ':'')+record.note+(record.persisted?' · 已保存在本机':' · 暂留当前页面');
+ ui.clipMeta.textContent=(hasVideo(record)?'':'视频已清理 · ')+record.duration.toFixed(1)+' 秒 · '+(record.width?record.width+' × '+record.height+' · ':'')+record.note+(record.persisted?' · 已保存在本机':' · 暂留当前页面');
  ui.trimStart.max=record.duration;ui.trimEnd.max=record.duration;ui.trimStart.value=record.trimStart.toFixed(1);ui.trimEnd.value=record.trimEnd.toFixed(1);
  ui.trimLabel.textContent=record.trimStart.toFixed(1)+'–'+record.trimEnd.toFixed(1)+' 秒';
- ui.analyzeBtn.disabled=false;ui.analysisProgress.hidden=true;ui.analysisError.hidden=true;ui.analysisIdle.hidden=!!record.analysis;
+ ui.analyzeBtn.disabled=!hasVideo(record);ui.applyTrimBtn.disabled=!hasVideo(record);ui.trimStart.disabled=!hasVideo(record);ui.trimEnd.disabled=!hasVideo(record);ui.reviewVideo.hidden=!hasVideo(record);ui.prevFrameBtn.disabled=!hasVideo(record);ui.nextFrameBtn.disabled=!hasVideo(record);ui.loopBtn.disabled=!hasVideo(record);ui.analysisProgress.hidden=true;ui.analysisError.hidden=true;ui.analysisIdle.hidden=!!record.analysis;
  ui.jumpAttentionInput.value=attention;
- updateVideoSaveControls();renderAnalysis();renderHistory();ui.reviewCount.textContent=String(records.length);
+ updateVideoSaveControls();renderAnalysis();ui.loopBtn.disabled=!hasVideo(record)||comparison.active;renderHistory();ui.reviewCount.textContent=String(records.length);
 }
 function renderHistory() {
- ui.historyList.replaceChildren();ui.historyTotal.textContent=String(records.length);
+ ui.historyList.replaceChildren();ui.historyTotal.textContent=String(records.length);ui.batchExportBtn.disabled=!records.some(hasVideo)||batchExportBusy;
  for(const record of records){
   const btn=document.createElement('button');btn.className='history-item'+(record===current?' active':'');
   const img=document.createElement('img');if(record.poster)img.src=record.poster;img.alt='';
   const div=document.createElement('div'),title=document.createElement('strong'),small=document.createElement('small');
-  title.textContent=record.actionType||'这一跳';small.textContent=new Date(record.createdAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})+' · '+record.duration.toFixed(1)+'秒 · '+(record.analysis?'已分析':'待复盘');
+  title.textContent=record.actionType||'这一跳';small.textContent=new Date(record.createdAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})+' · '+record.duration.toFixed(1)+'秒 · '+(record.analysis?'已分析':'待复盘')+(hasVideo(record)?'':' · 视频已清理');
   div.append(title,small);btn.append(img,div);btn.onclick=()=>selectRecord(record);ui.historyList.append(btn);
  }
 }
 let loopEnabled=true;
 ui.reviewVideo.addEventListener('timeupdate',()=>{
- if(!current||comparison.active)return;
+ if(!hasVideo(current)||comparison.active)return;
  if(!ui.reviewVideo.paused&&ui.reviewVideo.currentTime>=current.trimEnd-.05){
   if(loopEnabled){ui.reviewVideo.currentTime=current.trimStart;if(!ui.reviewVideo.paused)ui.reviewVideo.play().catch(()=>{});}
   else ui.reviewVideo.pause();
  }
 });
-ui.reviewVideo.addEventListener('ended',()=>{if(current&&!comparison.active&&loopEnabled){ui.reviewVideo.currentTime=current.trimStart;ui.reviewVideo.play().catch(()=>{});}});
-function reviewAt(time){comparison.pause();ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(time,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();}
+ui.reviewVideo.addEventListener('ended',()=>{if(hasVideo(current)&&!comparison.active&&loopEnabled){ui.reviewVideo.currentTime=current.trimStart;ui.reviewVideo.play().catch(()=>{});}});
+function reviewAt(time){if(!hasVideo(current)){toast('本机视频已清理，分析记录仍保留。');return;}comparison.pause();ui.reviewVideo.currentTime=current.trimStart+Math.min(Math.max(time,0),current.trimEnd-current.trimStart);ui.reviewVideo.pause();}
 function appendText(parent,tag,text,className=''){const el=document.createElement(tag);el.textContent=typeof text==='string'?text:JSON.stringify(text);if(className)el.className=className;parent.append(el);return el;}
 function renderComparison(){
  comparison.render(current,records);ui.compareSection.hidden=!comparePrevious||!current||analysisBusy;
@@ -552,6 +552,7 @@ async function extractFrames(record,signal) {
  }finally{reader.dispose();}
 }
 async function analyzeCurrent() {
+ if(!hasVideo(current)){toast('本机视频已清理，无法重新分析。');return;}
  if(!current||analysisBusy||armed||processing||finishing){if(armed||processing||finishing)toast('请先结束拍摄并等待保存完成。');return;}
  if(!apiKey){showSettings();toast('先填写自己的百炼模型 Key，再点击分析。');return;}
  if(!autoAnalyze){const yes=confirm('本次将把抽取画面直接发送至阿里云百炼模型，并产生 API 费用。是否继续？');if(!yes)return;}
@@ -579,7 +580,7 @@ function download(blob,name){const a=document.createElement('a');const url=URL.c
 function updateVideoSaveControls(){
  let available=false;try{available=!!current&&canShareVideo(makeVideoFile(current));}catch{}
  ui.shareVideoBtn.disabled=!available;
- ui.videoSaveHint.textContent=available?'在系统菜单中点击“存储视频”，即可保存到 iPhone 相册。':'请用支持系统视频保存的 iPhone Safari 打开。';
+ ui.videoSaveHint.textContent=current&&!hasVideo(current)?'本机视频已清理，分析记录仍保留。':available?'在系统菜单中点击“存储视频”，即可保存到 iPhone 相册。':'请用支持系统视频保存的 iPhone Safari 打开。';
 }
 ui.openCameraBtn.onclick=()=>openCamera().catch(err=>{toast(err.message);status(err.message,true);});
 ui.closeCameraBtn.onclick=closeCamera;ui.armBtn.onclick=armCapture;ui.stopBtn.onclick=()=>finishCapture('manual');
@@ -605,13 +606,13 @@ function setReviewSpeed(speed){
  document.querySelectorAll('[data-speed]').forEach(button=>{const selected=Number(button.dataset.speed)===speed;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));});
 }
 document.querySelectorAll('[data-speed]').forEach(btn=>btn.onclick=()=>setReviewSpeed(Number(btn.dataset.speed)));
-function stepFrame(delta){if(!current)return;comparison.pause();ui.reviewVideo.pause();ui.reviewVideo.currentTime=Math.min(current.trimEnd-.01,Math.max(current.trimStart,ui.reviewVideo.currentTime+delta/60));}
+function stepFrame(delta){if(!hasVideo(current))return;comparison.pause();ui.reviewVideo.pause();ui.reviewVideo.currentTime=Math.min(current.trimEnd-.01,Math.max(current.trimStart,ui.reviewVideo.currentTime+delta/60));}
 ui.prevFrameBtn.onclick=()=>stepFrame(-1);ui.nextFrameBtn.onclick=()=>stepFrame(1);
 ui.loopBtn.onclick=()=>{loopEnabled=!loopEnabled;ui.loopBtn.setAttribute('aria-pressed',String(loopEnabled));ui.loopBtn.classList.toggle('selected',loopEnabled);};ui.loopBtn.classList.add('selected');
 ui.nextJumpBtn.onclick=()=>{setView('capture');window.scrollTo({top:0,behavior:'smooth'});};
 ui.analyzeBtn.onclick=analyzeCurrent;ui.cancelAnalysisBtn.onclick=()=>analysisController?.abort();
 ui.applyTrimBtn.onclick=async()=>{
- if(!current||analysisBusy)return;
+ if(!hasVideo(current)||analysisBusy)return;
  const start=Number(ui.trimStart.value),end=Number(ui.trimEnd.value);
  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>current.duration||end-start<0.5||end-start>60){toast('请选择有效片段，时长为 0.5 至 60 秒。');return;}
  current.trimStart=start;current.trimEnd=Math.min(end,current.duration);current.analysis=null;current.keyframes=[];
@@ -634,6 +635,49 @@ ui.shareVideoBtn.onclick=async()=>{
   if(error.name==='AbortError')toast('已取消保存，视频仍保留在浏览器。');
   else toast('未能打开系统保存菜单，请重试；视频仍保留在浏览器。');
  }
+};
+let batchSelection=new Set();
+function updateBatchSelection(){
+ const available=records.filter(hasVideo);ui.batchSelectAll.checked=available.length>0&&available.every(record=>batchSelection.has(record.id));
+ ui.batchSelectAll.indeterminate=batchSelection.size>0&&!ui.batchSelectAll.checked;
+ ui.batchSaveBtn.disabled=batchExportBusy||batchSelection.size===0;
+ ui.batchExportStatus.textContent='已选 '+batchSelection.size+' / '+available.length+' 个视频';
+}
+function renderBatchList(){
+ ui.batchVideoList.replaceChildren();
+ for(const record of records.filter(hasVideo)){
+  const label=document.createElement('label');label.className='check-label batch-video-item';
+  const input=document.createElement('input');input.type='checkbox';input.checked=batchSelection.has(record.id);input.disabled=batchExportBusy;
+  const text=document.createElement('span');text.textContent=new Date(record.createdAt).toLocaleString('zh-CN')+' · '+(record.actionType||'这一跳')+' · '+record.duration.toFixed(1)+' 秒';
+  input.onchange=()=>{if(input.checked)batchSelection.add(record.id);else batchSelection.delete(record.id);updateBatchSelection();};
+  label.append(input,text);ui.batchVideoList.append(label);
+ }
+ updateBatchSelection();
+}
+ui.batchExportBtn.onclick=()=>{
+ if(armed||processing||finishing||analysisBusy||batchExportBusy){toast('请先完成当前拍摄或分析，再批量导出。');return;}
+ batchSelection=new Set(records.filter(hasVideo).map(record=>record.id));ui.batchDeleteInput.checked=false;renderBatchList();ui.batchExportDialog.showModal();
+};
+ui.batchCloseBtn.onclick=()=>{if(!batchExportBusy)ui.batchExportDialog.close();};
+ui.batchExportDialog.addEventListener('cancel',event=>{if(batchExportBusy)event.preventDefault();});
+ui.batchSelectAll.onchange=()=>{batchSelection=new Set(ui.batchSelectAll.checked?records.filter(hasVideo).map(record=>record.id):[]);renderBatchList();};
+async function clearExportedVideos(items){
+ const updates=items.map(record=>({...record,blob:null,videoClearedAt:Date.now()}));
+ await dbOp('readwrite',store=>{let request;for(const record of updates)request=store.put(record);return request;});
+ comparison.close();for(let i=0;i<items.length;i++)Object.assign(items[i],updates[i]);
+ if(current)await selectRecord(current);renderHistory();
+}
+ui.batchSaveBtn.onclick=async()=>{
+ if(batchExportBusy)return;
+ const selected=records.filter(record=>batchSelection.has(record.id)&&hasVideo(record)),remove=ui.batchDeleteInput.checked;
+ if(!selected.length)return;
+ batchExportBusy=true;ui.batchCloseBtn.disabled=true;ui.batchSelectAll.disabled=true;ui.batchDeleteInput.disabled=true;renderBatchList();
+ try{
+  const result=await exportVideoBatch(selected,{confirmSaved:()=>remove&&confirm('请先确认这 '+selected.length+' 个视频已成功保存到相册。现在删除它们在本机浏览器中的视频文件？分析记录将保留。'),clearVideos:clearExportedVideos});
+  ui.batchExportDialog.close();toast(result.cleared?'已清理 '+result.cleared+' 个本机视频，分析记录已保留。':'已完成系统导出操作，本机视频仍保留。');
+ }catch(error){
+  ui.batchExportStatus.textContent=error.name==='AbortError'?'已取消导出，本机视频未删除。':'未完成导出或清理：'+error.message+' 本机视频仍保留，可重试。';
+ }finally{batchExportBusy=false;ui.batchCloseBtn.disabled=false;ui.batchSelectAll.disabled=false;ui.batchDeleteInput.disabled=false;ui.batchSaveBtn.disabled=batchSelection.size===0;for(const label of ui.batchVideoList.children)label.children[0].disabled=false;renderHistory();}
 };
 ui.exportReportBtn.onclick=()=>{if(!current?.analysis)return;download(new Blob([JSON.stringify({createdAt:new Date(current.createdAt).toISOString(),action:current.action,range:{start:current.trimStart,end:current.trimEnd},...current.analysis,trainingContext:current.trainingContext||null},null,2)],{type:'application/json'}),'跃练-动作分析.json');};
 ui.deleteClipBtn.onclick=async()=>{

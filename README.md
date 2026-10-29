@@ -90,3 +90,5 @@ npm run dev
 模型清单在 src/model-catalog.js。网页不查询实时余额或保证调用免费；额度是否耗尽、过期及实际账单以百炼为准，请保留“免费额度用完即停”。不保存或发布账号额度、已用量、到期日期，也不上传原始额度清单。新增模型需要重新筛选后更新此列表。
 
 能力依据：[视觉理解](https://help.aliyun.com/zh/model-studio/vision-model)、[Kimi](https://help.aliyun.com/zh/model-studio/kimi-api)、[Qwen-Omni](https://help.aliyun.com/zh/model-studio/qwen-omni)。当前使用带时间戳的抽帧，不发送音频；接口构造、流式解析、用量与边界测试使用模拟响应，不消耗用户免费额度。
+
+批量导出：在逐跳记录中选择多个本机视频，一次打开系统保存菜单。可勾选导出后清理；返回页面确认视频已保存后，才在单个事务中清理所选视频文件，保留分析记录。取消、分享失败或未确认保存时不会清理。系统不支持本次文件组合时可减少选择数量重试。
