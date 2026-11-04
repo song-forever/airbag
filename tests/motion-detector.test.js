@@ -77,3 +77,22 @@ test('empty high-contrast ramp with only subpixel camera jitter never starts or 
   assert.equal(signal.completionMoving,false,`empty frame ${n} cannot keep recording alive`);
  }
 });
+
+test('a distant rider with sustained local movement passes the departure gate',()=>{
+ const gray=(x)=>{const data=new Uint8Array(width*height).fill(85);for(let y=43;y<57;y++)data.fill(220,y*width+x,y*width+x+9);return data;};
+ const detector=new Detector({width,height});
+ detector.update(gray(5),0);detector.update(gray(5),1800);
+ const states=[20,29,38].map((x,i)=>detector.update(gray(x),2000+i*180));
+ assert.ok(states.every(state=>state.changedRatio<.05));
+ assert.equal(states.at(-1).localDeparture,true);
+});
+
+test('a local change moving back and forth does not confirm a departure',()=>{
+ const frame=x=>{const data=new Uint8Array(width*height).fill(85);for(let y=43;y<57;y++)data.fill(220,y*width+x,y*width+x+9);return data;};
+ const detector=new Detector({width,height});
+ detector.update(frame(5),0);detector.update(frame(5),1800);
+ for(let i=0;i<8;i++){
+  const signal=detector.update(frame(i%2?40:30),2000+i*180);
+  assert.equal(signal.localDeparture,false);
+ }
+});

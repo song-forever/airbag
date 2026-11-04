@@ -2,7 +2,7 @@ import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.13.1';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.13.9';
 import { CameraZoom } from './camera-zoom.js?v=0.7.0';
-import { FrameMotionDetector } from './motion-detector.js?v=0.12.5';
+import { FrameMotionDetector } from './motion-detector.js?v=0.14.1';
 import { makeVideoFile, canShareVideo, hasVideo, exportVideoBatch } from './video-export.js?v=0.14.0';
 import { VIDEO_MODELS, CATALOG_DATE, DEFAULT_MODEL, getModel } from './model-catalog.js?v=0.13.1';
 import { analyzeFrames, MAX_BODY_BYTES, MAX_FRAME_BYTES } from './analysis-client.js?v=0.13.8';
@@ -325,7 +325,7 @@ function detectLoop() {
   if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，等待画面稳定 · 尚未录像';
   if(video.readyState>=2&&video.videoWidth&&!zoomSettling){
    const now=performance.now(),changed=detectFrameChange(video);
-   // Departure requires five-percent change; completion retains its separate lower threshold.
+   // Completion uses its own threshold regardless of how recording started.
    const completionMotion=motionState?.completionMoving??(motionState?.changedRatio>=.002);
    if(completionMotion){
     lastMotionAt=now;
@@ -338,13 +338,12 @@ function detectLoop() {
    }catch{/* Motion detection continues if person inference fails. */}}
    if(armed&&departureAt===null){
     const warmingUp=now-armedAt<2000;
-    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待 5% 持续变化';
-    if(!warmingUp&&changed){
-     if(motionSince===null)motionSince=now;
-     if(now-motionSince>=350){
-      try{startMotionRecording(detections);}catch(error){finishCapture('track_ended',true);toast('未能开始录像：'+error.message);return;}
-     }
-    }else motionSince=null;
+    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待持续运动';
+    if(!warmingUp&&changed)motionSince??=now;
+    else motionSince=null;
+    if(!warmingUp&&(motionState?.localDeparture||(motionSince!==null&&now-motionSince>=350))){
+     try{startMotionRecording(detections);}catch(error){finishCapture('track_ended',true);toast('未能开始录像：'+error.message);return;}
+    }
    }
    if(armed&&departureAt!==null&&firstPersonAt===null&&detections.length)firstPersonAt=now;
    const info=armed&&departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};

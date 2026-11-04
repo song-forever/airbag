@@ -5,6 +5,7 @@ export class FrameMotionDetector {
  }
  reset(){
   this.previous=null;this.startedAt=null;
+  this.localMotion=[];
   this.low=new Uint8Array(this.width*this.height).fill(255);
   this.high=new Uint8Array(this.width*this.height);
  }
@@ -26,7 +27,10 @@ export class FrameMotionDetector {
     }
    }
   }
-  if(!old||learning)return {moving:false,cameraMoving:false,ready:false,changedRatio:0,completionMoving:false};
+  if(!old||learning){
+   this.localMotion=[];
+   return {moving:false,cameraMoving:false,ready:false,changedRatio:0,completionMoving:false,localDeparture:false};
+  }
   let drift=0;
   for(let y=top;y<bottom;y++)for(let x=left;x<right;x++)drift+=frame[y*w+x]-old[y*w+x];
   drift/=count;
@@ -38,9 +42,9 @@ export class FrameMotionDetector {
    if(frame[k]>=low&&frame[k]<=high&&old[k]>=low&&old[k]<=high)continue;
    mask[k]=1;
   }
-  // Scattered compression pixels do not add up to a moving target. Keep
-  // connected local changes; do not impose a five-percent frame-area gate.
+  // Count connected changes and measure their overall spread and center.
   const queue=new Int32Array(n);let maxComponent=0,qualifiedPixels=0;
+  let minX=w,minY=h,maxX=0,maxY=0,sumX=0,sumY=0;
   for(let y=top;y<bottom;y++)for(let x=left;x<right;x++){
    const k=y*w+x;if(!mask[k])continue;
    let size=1;queue[0]=k;mask[k]=0;
@@ -52,10 +56,35 @@ export class FrameMotionDetector {
     }
    }
    maxComponent=Math.max(maxComponent,size);
-   if(size>=this.minChangedPixels)qualifiedPixels+=size;
+   if(size<this.minChangedPixels)continue;
+   qualifiedPixels+=size;
+   for(let i=0;i<size;i++){
+    const x=queue[i]%w,y=Math.floor(queue[i]/w);
+    minX=Math.min(minX,x);minY=Math.min(minY,y);
+    maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);
+    sumX+=x;sumY+=y;
+   }
   }
-  return {moving:maxComponent>=this.minChangedPixels,cameraMoving:false,ready:true,
+  const localized=maxComponent>=Math.ceil(count*.006)
+   &&maxX-minX+1<=(right-left)*.65&&maxY-minY+1<=(bottom-top)*.7;
+  const localDeparture=this.confirmLocalMotion(localized?{x:sumX/qualifiedPixels,y:sumY/qualifiedPixels,time:now}:null);
+  return {localDeparture,moving:maxComponent>=this.minChangedPixels,cameraMoving:false,ready:true,
    changedRatio:qualifiedPixels/count,
    completionMoving:qualifiedPixels>=Math.max(this.minChangedPixels,Math.ceil(count*.002))};
+ }
+ confirmLocalMotion(point){
+  if(!point){this.localMotion=[];return false;}
+  const history=this.localMotion;
+  const previous=history.at(-1);
+  if(previous&&(point.time-previous.time>350||Math.hypot(point.x-previous.x,point.y-previous.y)>this.width*.25))history.length=0;
+  history.push(point);
+  while(point.time-history[0].time>700)history.shift();
+  const first=history[0];
+  if(history.length<3||point.time-first.time<350)return false;
+  const displacement=Math.hypot(point.x-first.x,point.y-first.y);
+  let distance=0;
+  for(let i=1;i<history.length;i++)distance+=Math.hypot(history[i].x-history[i-1].x,history[i].y-history[i-1].y);
+  // A small oscillation may change many pixels, but does not travel consistently.
+  return displacement>=this.width*.035&&displacement>=distance*.75;
  }
 }
