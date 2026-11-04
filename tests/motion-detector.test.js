@@ -65,7 +65,7 @@ test('tiny start-level changes do not count as ongoing completion motion',()=>{
  const gray=p=>{const g=new Uint8Array(width*height);for(let i=0;i<g.length;i++)g[i]=p[i*4];return g;};
  const d=new Detector({width,height});d.update(gray(image({box:150})),0,{learning:false});
  const small=d.update(gray(smallPatch(80,40)),180,{learning:false});assert.equal(small.moving,true);assert.equal(small.completionMoving,false);
- const big=d.update(gray(image({shift:3,box:150})),360,{learning:false});assert.equal(big.completionMoving,true);
+ const big=d.update(gray(image({box:65})),360,{learning:false});assert.equal(big.completionMoving,true);
 });
 
 test('empty high-contrast ramp with only subpixel camera jitter never starts or sustains motion',()=>{
@@ -95,4 +95,23 @@ test('a local change moving back and forth does not confirm a departure',()=>{
   const signal=detector.update(frame(i%2?40:30),2000+i*180);
   assert.equal(signal.localDeparture,false);
  }
+});
+
+test('background alignment removes a camera drift while preserving rider motion',()=>{
+ const detector=new Detector({width:WIDTH,height:HEIGHT});
+ const first=scene();
+ detector.update(first,0);detector.update(first,1800);
+ for(let i=1;i<=5;i++){
+  const state=detector.update(scene({dx:i*2,dy:i}),2000+(i-1)*180);
+  assert.equal(state.cameraMoving,true);
+  assert.ok(state.changedRatio<.05);
+  assert.equal(state.localDeparture,false);
+ }
+ detector.reset();
+ detector.update(first,0);detector.update(first,1800);
+ const states=[1,2,3,4].map(i=>detector.update(scene({
+  dx:i*2,dy:i,rider:{x:18+i*11,y:49,w:11,h:15}
+ }),2000+(i-1)*180));
+ assert.ok(states.some(state=>state.cameraMoving));
+ assert.ok(states.some(state=>state.localDeparture));
 });
