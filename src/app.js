@@ -163,10 +163,16 @@ async function initializeHistory() {
  catch {toast('当前浏览器无法保存历史记录；仍可拍摄、分析和下载。');}
  ui.reviewCount.textContent=String(records.length);renderHistory();
 }
+function renderDetectionButton() {
+ ui.armBtn.disabled=processing||finishing||(!detectionActive&&analysisBusy);
+ ui.armLabel.textContent=finishing?'正在保存…':processing?'正在准备…':detectionActive?'结束探测':'开始探测';
+ ui.armBtn.setAttribute('aria-pressed',String(detectionActive));
+ ui.armBtn.classList.toggle('detecting',detectionActive);
+}
 function setCaptureControls(busy) {
- ui.armBtn.hidden=false;ui.armBtn.disabled=busy||processing||finishing;ui.recordActions.hidden=!busy||!recorder;ui.importBtn.disabled=busy||processing||finishing;
+ ui.armBtn.hidden=false;renderDetectionButton();ui.recordActions.hidden=!busy||!recorder;ui.importBtn.disabled=busy||processing||finishing;
  ui.reviewTab.disabled=busy||processing||finishing;
- ui.stopDetectionBtn.disabled=!stream&&!detectionActive;
+
  ui.openCameraBtn.disabled=processing;ui.closeCameraBtn.hidden=!stream||busy;
 }
 function keepAwake() {
@@ -212,7 +218,7 @@ function openCamera() {
    cameraZoom.attach(acquired.getVideoTracks()[0]);
    ui.cameraQuality.textContent=(settings.width||'')+' × '+(settings.height||'')+' · '+Math.round(settings.frameRate||30)+' fps';
    ui.cameraBadge.innerHTML='<i></i> CAMERA READY';
-   ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;ui.stopDetectionBtn.disabled=false;
+   ui.cameraHint.textContent='相机已就绪 · 保持手机固定';status('相机已开启，准备后将自动等待出发');ui.closeCameraBtn.hidden=false;renderDetectionButton();
    acquired.getVideoTracks()[0].onended=()=>{if(stream!==acquired)return;if(armed)finishCapture('track_ended');else closeCamera();};
    return acquired;
   }catch(err){
@@ -234,7 +240,7 @@ function closeCamera() {
  ui.cameraVideo.srcObject=null;ui.cameraVideo.hidden=true;ui.cameraPlaceholder.hidden=false;ui.cameraStage.classList.remove('live');
  ui.cameraBadge.innerHTML='<i></i> CAMERA OFF';ui.cameraBadge.classList.remove('recording');ui.closeCameraBtn.hidden=true;
  const ctx=ui.trackingCanvas.getContext('2d');ctx.clearRect(0,0,ui.trackingCanvas.width,ui.trackingCanvas.height);
- ui.stopDetectionBtn.disabled=true;status('摄像头已关闭');ui.cameraHint.textContent='准备好后，点击下方按钮';ui.recordClock.textContent='00:00';
+ renderDetectionButton();status('摄像头已关闭');ui.cameraHint.textContent='准备好后，点击下方按钮';ui.recordClock.textContent='00:00';
 }
 async function createPersonDetector(delegate) {
  const {FilesetResolver,ObjectDetector}=await import(new URL('./vision/vision_bundle.mjs',import.meta.url).href);
@@ -310,7 +316,7 @@ async function armCapture() {
   },200);
   detectLoop();
  }catch(err){status(err.message,true);toast(err.message);}
- finally{processing=false;ui.armBtn.disabled=false;ui.armLabel.textContent='开始探测';setCaptureControls(armed);}
+ finally{processing=false;setCaptureControls(armed);}
 }
 function queueAutoFinish(reason,now){
  if(autoFinishAt!==null)return;autoFinishReason=reason;autoFinishAt=Math.max(recordingStart+MIN_RECORDING_MS,now+END_TAIL_MS);
@@ -397,7 +403,7 @@ async function finalizeRecording() {
   clip.poster=await getPoster(blob,clip.trimStart+.1);records.unshift(clip);await persistRecord(clip);await selectRecord(clip,{internal:true});setView('review');window.scrollTo({top:0,behavior:'smooth'});
   if(shouldAnalyze)setTimeout(()=>{if(current===clip)analyzeCurrent();},0);else if(autoAnalyze&&!apiKey)toast('录像已保存。请在设置中填写百炼模型 Key 后分析。');
  }catch(err){toast('录像处理失败：'+err.message);}
- finally{finishing=false;recorder=null;ui.armBtn.disabled=false;ui.armLabel.textContent='准备下一跳';setCaptureControls(false);if(detectionActive){ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraBadge.classList.remove('recording');ui.cameraHint.textContent='侦测继续开启 · 点击准备下一跳可录像';ui.recordClock.textContent='侦测中';status('本跳已结束，侦测继续开启；点击准备下一跳可再次录像');}}
+ finally{finishing=false;recorder=null;setCaptureControls(false);if(detectionActive){ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraBadge.classList.remove('recording');ui.cameraHint.textContent='侦测继续开启 · 点击回放页的“下一跳”可录像';ui.recordClock.textContent='侦测中';status('本跳已结束，侦测继续开启；点击回放页的“下一跳”可再次录像');}}
 }
 async function importVideo(file) {
  if(!file)return;
@@ -559,7 +565,7 @@ async function analyzeCurrent() {
  comparison.close();ui.compareSection.hidden=true;
  const trainingContext=getTrainingContext({...record,actionMode:'auto'},records);
  const beforeExtraction={trimStart:record.trimStart,trimEnd:record.trimEnd,contentStart:record.contentStart,contentStartConfirmed:record.contentStartConfirmed};
- ui.analysisProgress.hidden=false;ui.analysisIdle.hidden=true;ui.analysisResult.hidden=true;ui.analysisError.hidden=true;ui.analyzeBtn.hidden=true;ui.analysisMeter.value=0;ui.progressTitle.textContent='正在准备画面';ui.armBtn.disabled=true;ui.importBtn.disabled=true;ui.nextJumpBtn.disabled=true;ui.deleteClipBtn.disabled=true;ui.applyTrimBtn.disabled=true;
+ ui.analysisProgress.hidden=false;ui.analysisIdle.hidden=true;ui.analysisResult.hidden=true;ui.analysisError.hidden=true;ui.analyzeBtn.hidden=true;ui.analysisMeter.value=0;ui.progressTitle.textContent='正在准备画面';renderDetectionButton();ui.importBtn.disabled=true;ui.nextJumpBtn.disabled=true;ui.deleteClipBtn.disabled=true;ui.applyTrimBtn.disabled=true;
  let timer=null;
  try {
   const prepared=await extractFrames(record,analysisController.signal),frames=prepared.frames;
@@ -572,7 +578,7 @@ async function analyzeCurrent() {
  }catch(err){
   if(run===analysisRun){Object.assign(record,beforeExtraction);ui.trimStart.value=record.trimStart.toFixed(1);ui.trimEnd.value=record.trimEnd.toFixed(1);ui.trimLabel.textContent=record.trimStart.toFixed(1)+'–'+record.trimEnd.toFixed(1)+' 秒';ui.analysisError.hidden=false;ui.analysisError.textContent=err.name==='AbortError'?'分析已取消或请求超时，视频仍保存在本机。':err.message;ui.analysisIdle.hidden=!!record.analysis;if(record.analysis)renderAnalysis();}
  }finally{
-  clearTimeout(timer);if(run===analysisRun){analysisBusy=false;ui.jumpAttentionInput.disabled=false;analysisController=null;ui.analysisProgress.hidden=true;ui.analyzeBtn.hidden=false;ui.armBtn.disabled=false;ui.importBtn.disabled=false;ui.nextJumpBtn.disabled=false;ui.deleteClipBtn.disabled=false;ui.applyTrimBtn.disabled=false;renderComparison();}
+  clearTimeout(timer);if(run===analysisRun){analysisBusy=false;ui.jumpAttentionInput.disabled=false;analysisController=null;ui.analysisProgress.hidden=true;ui.analyzeBtn.hidden=false;renderDetectionButton();ui.importBtn.disabled=false;ui.nextJumpBtn.disabled=false;ui.deleteClipBtn.disabled=false;ui.applyTrimBtn.disabled=false;renderComparison();}
  }
 }
 function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;a.rel='noopener';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),300000);}
@@ -582,9 +588,16 @@ function updateVideoSaveControls(){
  ui.videoSaveHint.textContent=current&&!hasVideo(current)?'本机视频已清理，分析记录仍保留。':available?'在系统菜单中点击“存储视频”，即可保存到 iPhone 相册。':'请用支持系统视频保存的 iPhone Safari 打开。';
 }
 ui.openCameraBtn.onclick=()=>openCamera().catch(err=>{toast(err.message);status(err.message,true);});
-ui.closeCameraBtn.onclick=closeCamera;ui.armBtn.onclick=armCapture;ui.stopBtn.onclick=()=>finishCapture('manual');
+ui.closeCameraBtn.onclick=closeCamera;ui.armBtn.onclick=()=>{
+ if(processing||finishing)return;
+ if(detectionActive){
+  detectionActive=false;
+  if(armed)finishCapture('manual');
+  else{clearTimeout(inferenceTimer);closeCamera();status('探测已结束');}
+ }else return armCapture();
+};ui.stopBtn.onclick=()=>finishCapture('manual');
 ui.cancelBtn.onclick=()=>finishCapture('manual',true);
-ui.stopDetectionBtn.onclick=()=>{detectionActive=false;if(armed){finishCapture('manual');}else{clearTimeout(inferenceTimer);closeCamera();status('探测已结束');}};
+
 ui.importBtn.onclick=ui.emptyImportBtn.onclick=()=>ui.fileInput.click();
 ui.fileInput.onchange=()=>importVideo(ui.fileInput.files[0]);
 ui.captureTab.onclick=()=>setView('capture');ui.reviewTab.onclick=()=>setView('review');
@@ -608,7 +621,10 @@ document.querySelectorAll('[data-speed]').forEach(btn=>btn.onclick=()=>setReview
 function stepFrame(delta){if(!hasVideo(current))return;comparison.pause();ui.reviewVideo.pause();ui.reviewVideo.currentTime=Math.min(current.trimEnd-.01,Math.max(current.trimStart,ui.reviewVideo.currentTime+delta/60));}
 ui.prevFrameBtn.onclick=()=>stepFrame(-1);ui.nextFrameBtn.onclick=()=>stepFrame(1);
 ui.loopBtn.onclick=()=>{loopEnabled=!loopEnabled;ui.loopBtn.setAttribute('aria-pressed',String(loopEnabled));ui.loopBtn.classList.toggle('selected',loopEnabled);};ui.loopBtn.classList.add('selected');
-ui.nextJumpBtn.onclick=()=>{setView('capture');window.scrollTo({top:0,behavior:'smooth'});};
+ui.nextJumpBtn.onclick=()=>{
+ setView('capture');window.scrollTo({top:0,behavior:'smooth'});
+ if(detectionActive&&!armed)return armCapture();
+};
 ui.analyzeBtn.onclick=analyzeCurrent;ui.cancelAnalysisBtn.onclick=()=>analysisController?.abort();
 ui.applyTrimBtn.onclick=async()=>{
  if(!hasVideo(current)||analysisBusy)return;

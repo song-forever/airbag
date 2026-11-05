@@ -157,10 +157,11 @@ test('wake-lock await cannot restart timers after a visibility interruption',asy
 });
 
 test('waiting for departure never creates a recorder or expires at one minute',async()=>{
- const f=fixture();await f.api.armCapture();f.setNow(200000);
+ const f=fixture();await f.nodes.armBtn.onclick();
+ assert.equal(f.nodes.armLabel.textContent,'结束探测');assert.equal(f.nodes.armBtn.disabled,false);f.setNow(200000);
  for(const timer of [...f.timers.values()].filter(item=>item.kind==='interval'))timer.fn();
  assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().armed,true);assert.equal(f.api.snapshot().detectionActive,true);
- f.nodes.stopDetectionBtn.onclick();assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,false);
+ f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,false);
 });
 test('automatic video completion retains the tail and leaves detection active',async()=>{
  const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);const recorder=f.recorders[0];recorder.ondataavailable({data:new Blob([new Uint8Array(250)])});
@@ -168,7 +169,9 @@ test('automatic video completion retains the tail and leaves detection active',a
  f.setNow(13999);tick();assert.equal(recorder.state,'recording');
  f.setNow(14000);tick();assert.equal(recorder.state,'inactive');await recorder.onstop();
  assert.equal(f.api.snapshot().records.length,1);assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,true);assert.equal(f.api.snapshot().stream.track.stops,0);
- f.nodes.stopDetectionBtn.onclick();assert.equal(f.api.snapshot().stream,null);
+ assert.equal(f.nodes.armLabel.textContent,'结束探测');
+ await f.nodes.nextJumpBtn.onclick();assert.equal(f.api.snapshot().armed,true);
+ f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armLabel.textContent,'开始探测');
 });
 
 test('zooming while waiting suppresses motion-triggered recording and inference until the image settles',async()=>{
@@ -341,4 +344,12 @@ test('waiting for camera permission cannot consume the two-second motion warmup'
  f.setNow(12000);f.api.detectLoop();f.setNow(12349);f.api.detectLoop();assert.equal(f.recorders.length,0);
  f.setNow(12350);f.api.detectLoop();assert.equal(f.recorders.length,1);
  f.api.finishCapture('manual',true);await f.recorders[0].onstop();
+});
+
+test('the merged detection button saves an active recording and closes detection',async()=>{
+ const f=fixture();await f.nodes.armBtn.onclick();f.api.startMotionRecording([]);
+ assert.equal(f.nodes.armBtn.disabled,false);assert.equal(f.nodes.armLabel.textContent,'结束探测');
+ const recorder=f.recorders[0];recorder.ondataavailable({data:new Blob([new Uint8Array(250)])});
+ f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().detectionActive,false);assert.equal(recorder.state,'inactive');
+ await recorder.onstop();assert.equal(f.api.snapshot().records.length,1);assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armLabel.textContent,'开始探测');
 });
