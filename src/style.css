@@ -32,3 +32,5 @@
 .batch-export-toolbar{margin:12px 0 16px}.batch-video-list{max-height:36vh;overflow:auto;border-block:1px solid #d7dfd0;margin:12px 0}.batch-video-item{padding:12px 4px;margin:0!important;min-height:48px}.batch-video-item span{font-size:12px;line-height:1.6}
 
 .capture-controls>#armBtn{flex:0 0 100%;width:100%;min-height:54px}.capture-controls>#armBtn.detecting .record-dot{border-radius:2px}
+
+.batch-export-toolbar{display:flex;flex-wrap:wrap;gap:10px}
