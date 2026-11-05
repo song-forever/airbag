@@ -16,7 +16,7 @@ const settingsStore=createSettingsStore({getStorage:()=>localStorage,appPath:new
 let {apiKey,autoAnalyze,model,attention,comparePrevious,persisted:settingsPersisted}=settingsStore.snapshot();
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let analysisDetector=null,analysisDetectorPromise=null;
-let detectionActive=false,batchExportBusy=false,batchAnalysisBusy=false;
+let detectionActive=false,batchExportBusy=false,clearingRecords=false;
 let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
@@ -434,8 +434,8 @@ async function selectRecord(record,{internal=false}={}) {
  updateVideoSaveControls();renderAnalysis();ui.loopBtn.disabled=!hasVideo(record)||comparison.active;renderHistory();ui.reviewCount.textContent=String(records.length);
 }
 function renderHistory() {
- ui.historyList.replaceChildren();ui.historyTotal.textContent=String(records.length);ui.batchExportBtn.disabled=!records.some(hasVideo)||batchExportBusy||batchAnalysisBusy;
- ui.batchAnalysisBtn.disabled=!records.some(record=>record.analysis)||batchExportBusy||batchAnalysisBusy;
+ ui.historyList.replaceChildren();ui.historyTotal.textContent=String(records.length);ui.batchExportBtn.disabled=!records.some(hasVideo)||batchExportBusy||clearingRecords;
+ ui.clearRecordsBtn.disabled=!records.length||batchExportBusy||clearingRecords;
  for(const record of records){
   const btn=document.createElement('button');btn.className='history-item'+(record===current?' active':'');
   const img=document.createElement('img');if(record.poster)img.src=record.poster;img.alt='';
@@ -671,17 +671,36 @@ function renderBatchList(){
  updateBatchSelection();
 }
 ui.batchExportBtn.onclick=()=>{
- if(armed||processing||finishing||analysisBusy||batchExportBusy||batchAnalysisBusy){toast('请先完成当前拍摄或分析，再批量导出。');return;}
+ if(armed||processing||finishing||analysisBusy||batchExportBusy||clearingRecords){toast('请先完成当前拍摄或分析，再批量导出。');return;}
  batchSelection=new Set(records.filter(hasVideo).map(record=>record.id));ui.batchDeleteInput.checked=false;renderBatchList();ui.batchExportDialog.showModal();
 };
 ui.batchCloseBtn.onclick=()=>{if(!batchExportBusy)ui.batchExportDialog.close();};
 ui.batchExportDialog.addEventListener('cancel',event=>{if(batchExportBusy)event.preventDefault();});
 ui.batchSelectAll.onchange=()=>{batchSelection=new Set(ui.batchSelectAll.checked?records.filter(hasVideo).map(record=>record.id):[]);renderBatchList();};
-async function clearExportedVideos(items){
- const updates=items.map(record=>({...record,blob:null,videoClearedAt:Date.now()}));
- await dbOp('readwrite',store=>{let request;for(const record of updates)request=store.put(record);return request;});
- comparison.close();for(let i=0;i<items.length;i++)Object.assign(items[i],updates[i]);
- if(current)await selectRecord(current);renderHistory();
+async function refreshAfterDeletion(deletedIds) {
+ comparison.close();
+ records=records.filter(record=>!deletedIds.has(record.id));
+ batchSelection=new Set([...batchSelection].filter(id=>!deletedIds.has(id)));
+ ui.batchVideoList.replaceChildren();
+ const next=records.find(record=>record.id===current?.id)||records[0];
+ if(next)await selectRecord(next);
+ else {
+  current=null;comparison.render(null,[]);ui.compareSection.hidden=true;
+  ui.reviewVideo.onloadedmetadata=null;
+  if(currentUrl){URL.revokeObjectURL(currentUrl);currentUrl=null;}
+  ui.reviewVideo.pause();ui.reviewVideo.removeAttribute('src');ui.reviewVideo.load();
+  ui.reviewContent.hidden=true;ui.reviewEmpty.hidden=false;ui.reviewCount.textContent='0';
+  ui.analysisResult.replaceChildren();ui.analysisResult.hidden=true;ui.exportReportBtn.disabled=true;
+ }
+ renderHistory();
+}
+async function deleteExportedRecords(items) {
+ await dbOp('readwrite',store=>{
+  let request;
+  for(const record of items)request=store.delete(record.id);
+  return request;
+ });
+ await refreshAfterDeletion(new Set(items.map(record=>record.id)));
 }
 ui.batchSaveBtn.onclick=async()=>{
  if(batchExportBusy)return;
@@ -689,78 +708,26 @@ ui.batchSaveBtn.onclick=async()=>{
  if(!selected.length)return;
  batchExportBusy=true;ui.batchCloseBtn.disabled=true;ui.batchSelectAll.disabled=true;ui.batchDeleteInput.disabled=true;renderBatchList();
  try{
-  const result=await exportVideoBatch(selected,{confirmSaved:()=>remove&&confirm('请先确认这 '+selected.length+' 个视频已成功保存到相册。现在删除它们在本机浏览器中的视频文件？分析记录将保留。'),clearVideos:clearExportedVideos});
-  ui.batchExportDialog.close();toast(result.cleared?'已清理 '+result.cleared+' 个本机视频，分析记录已保留。':'已完成系统导出操作，本机视频仍保留。');
+  const result=await exportVideoBatch(selected,{confirmSaved:()=>remove&&confirm('请先确认这 '+selected.length+' 个视频已成功保存到相册。现在删除它们在本机浏览器中的视频、分析和对应记录？'),clearVideos:deleteExportedRecords});
+  ui.batchExportDialog.close();toast(result.cleared?'已删除 '+result.cleared+' 条本地记录及对应视频、分析。':'已完成系统导出操作，本机视频仍保留。');
  }catch(error){
   ui.batchExportStatus.textContent=error.name==='AbortError'?'已取消导出，本机视频未删除。':'未完成导出或清理：'+error.message+' 本机视频仍保留，可重试。';
  }finally{batchExportBusy=false;ui.batchCloseBtn.disabled=false;ui.batchSelectAll.disabled=false;ui.batchDeleteInput.disabled=false;ui.batchSaveBtn.disabled=batchSelection.size===0;for(const label of ui.batchVideoList.children)label.children[0].disabled=false;renderHistory();}
 };
-let selectedAnalyses=new Set();
-function updateAnalysisSelection() {
- const available=records.filter(record=>record.analysis);
- ui.batchAnalysisAll.checked=available.length>0&&available.every(record=>selectedAnalyses.has(record.id));
- ui.batchAnalysisAll.indeterminate=selectedAnalyses.size>0&&!ui.batchAnalysisAll.checked;
- ui.batchAnalysisDeleteBtn.disabled=batchAnalysisBusy||selectedAnalyses.size===0;
- ui.batchAnalysisStatus.textContent='已选 '+selectedAnalyses.size+' / '+available.length+' 条分析';
-}
-function renderAnalysisSelection() {
- ui.batchAnalysisList.replaceChildren();
- for(const record of records.filter(record=>record.analysis)) {
-  const label=document.createElement('label');
-  label.className='check-label batch-video-item';
-  const input=document.createElement('input');
-  input.type='checkbox';input.checked=selectedAnalyses.has(record.id);
-  const description=document.createElement('span');
-  description.textContent=new Date(record.createdAt).toLocaleString('zh-CN')+' · '+(record.actionType||'这一跳');
-  input.onchange=()=>{
-   if(input.checked)selectedAnalyses.add(record.id);
-   else selectedAnalyses.delete(record.id);
-   updateAnalysisSelection();
-  };
-  label.append(input,description);ui.batchAnalysisList.append(label);
- }
- updateAnalysisSelection();
-}
-ui.batchAnalysisBtn.onclick=()=>{
- if(armed||processing||finishing||analysisBusy||batchExportBusy||batchAnalysisBusy){toast('请先完成当前操作，再删除分析。');return;}
- selectedAnalyses=new Set();renderAnalysisSelection();ui.batchAnalysisDialog.showModal();
-};
-ui.batchAnalysisAll.onchange=()=>{
- selectedAnalyses=new Set(ui.batchAnalysisAll.checked?records.filter(record=>record.analysis).map(record=>record.id):[]);
- renderAnalysisSelection();
-};
-ui.batchAnalysisCloseBtn.onclick=()=>{if(!batchAnalysisBusy)ui.batchAnalysisDialog.close();};
-ui.batchAnalysisDialog.addEventListener('cancel',event=>{if(batchAnalysisBusy)event.preventDefault();});
-ui.batchAnalysisDeleteBtn.onclick=async()=>{
- if(armed||processing||finishing||analysisBusy||batchExportBusy||batchAnalysisBusy)return;
- const selected=records.filter(record=>record.analysis&&selectedAnalyses.has(record.id));
- if(!selected.length||!confirm('删除所选 '+selected.length+' 条分析？视频和逐跳记录会保留，删除后无法恢复分析。'))return;
- const updates=selected.map(record=>{
-  const updated={...record,analysis:null,keyframes:[],trainingContext:null};
-  if(record.actionMode==='auto'){updated.actionType='待识别动作';updated.action='自动识别动作';}
-  return updated;
- });
- batchAnalysisBusy=true;
- ui.batchAnalysisCloseBtn.disabled=true;ui.batchAnalysisAll.disabled=true;ui.batchAnalysisDeleteBtn.disabled=true;
- for(const label of ui.batchAnalysisList.children)label.children[0].disabled=true;
+ui.clearRecordsBtn.onclick=async()=>{
+ if(armed||processing||finishing||analysisBusy||batchExportBusy||clearingRecords){toast('请先完成当前操作，再清空记录。');return;}
+ if(!records.length)return;
+ const approved=confirm('确定清空本机全部 '+records.length+' 条训练记录？所有视频、分析和记录都将删除，无法恢复。');
+ if(!approved)return;
+ clearingRecords=true;renderHistory();
  try {
-  await dbOp('readwrite',store=>{
-   let request;
-   for(const record of updates)request=store.put(record);
-   return request;
-  });
-  comparison.close();
-  for(let i=0;i<selected.length;i++)Object.assign(selected[i],updates[i]);
-  if(current)await selectRecord(current);
-  ui.batchAnalysisDialog.close();toast('已删除 '+selected.length+' 条分析。');
+  await dbOp('readwrite',store=>store.clear());
+  await refreshAfterDeletion(new Set(records.map(record=>record.id)));
+  toast('本地训练记录已全部清空。');
  } catch(error) {
-  ui.batchAnalysisStatus.textContent='删除失败，请重试。'+(error.message||'');
+  toast('清空失败，请重试。'+(error.message||''));
  } finally {
-  batchAnalysisBusy=false;
-  ui.batchAnalysisCloseBtn.disabled=false;ui.batchAnalysisAll.disabled=false;
-  ui.batchAnalysisDeleteBtn.disabled=selectedAnalyses.size===0;
-  for(const label of ui.batchAnalysisList.children)label.children[0].disabled=false;
-  renderHistory();
+  clearingRecords=false;renderHistory();
  }
 };
 ui.exportReportBtn.onclick=()=>{if(!current?.analysis)return;download(new Blob([JSON.stringify({createdAt:new Date(current.createdAt).toISOString(),action:current.action,range:{start:current.trimStart,end:current.trimEnd},...current.analysis,trainingContext:current.trainingContext||null},null,2)],{type:'application/json'}),'跃练-动作分析.json');};
