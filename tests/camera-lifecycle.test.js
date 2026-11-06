@@ -34,7 +34,14 @@ function fixture({getUserMedia,wakeRequest}={}){
  let motionPixels=new Uint8Array(160*90*4);
  document.getElementById=id=>nodes[id];document.createElement=tag=>{const el=new Element(tag);if(tag==='canvas'){const getContext=el.getContext.bind(el);el.getContext=()=>({...getContext(),getImageData:()=>({data:motionPixels})});}return el;};
  document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-action]'?actions:query==='[data-speed]'?speeds:query.startsWith('[data-action],')?[...actions,nodes.actionDetail,nodes.focusInput]:[];
- const recorders=[];
+ const recorders=[],buffers=[];
+ class FakePreRoll {
+  constructor(){this.parts=[];this.committed=false;buffers.push(this);}
+  async append(blob){this.parts.push(blob);}
+  commit(){this.committed=true;}
+  async finish(){return {blob:new Blob(this.parts,{type:'video/mp4'}),startTime:0,duration:8,preRollSeconds:2};}
+  dispose(){this.parts=[];}
+ }
  class Recorder {
   static isTypeSupported(){return true;}
   constructor(stream,options){this.stream=stream;this.mimeType=options.mimeType;this.state='inactive';recorders.push(this);}
@@ -48,13 +55,15 @@ function fixture({getUserMedia,wakeRequest}={}){
  if(wakeRequest)navigator.wakeLock={request:wakeRequest};
  let now=1000;
  const context=vm.createContext({document,window,navigator,MediaRecorder:Recorder,console,Blob,URL,DOMException,Event,devicePixelRatio:1,
-  ...imported,
+  ...imported,Mp4PreRoll:FakePreRoll,buffers,
   crypto:{randomUUID},performance:{now:()=>now},localStorage:{getItem:()=>null,setItem(){}},
   JumpTracker:class {reset(){}startFromMotion(){}update(){return {state:'waiting',target:null,reason:'searching'};}},
   setTimeout:fn=>addTimer('timeout',fn),setInterval:fn=>addTimer('interval',fn),clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),confirm:()=>true});
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nthis.testAPI={openCamera,closeCamera,armCapture,startMotionRecording,queueAutoFinish,finishCapture,finalizeRecording,detectLoop,
   zoom:value=>cameraZoom.set(value),
-  snapshot:()=>({stream,armed,finishing,activeCapture:typeof activeCapture==='undefined'?null:activeCapture,records,armTimer,wakeLock,detectionActive,zoom:{...cameraZoom.state},zoomQuietUntil,motionSince,autoFinishAt,autoFinishReason}),
+  confirmedCount:()=>buffers.filter(buffer=>buffer.committed).length,
+  snapshot:()=>({stream,armed,finishing,departureAt,activeCapture:typeof activeCapture==='undefined'?null:activeCapture,records,armTimer,wakeLock,detectionActive,zoom:{...cameraZoom.state},zoomQuietUntil,motionSince,autoFinishAt,autoFinishReason}),
+  failRecordingStart:()=>{MediaRecorder.prototype.start=()=>{throw new Error('encoder unavailable');};},
   mockProcessing:()=>{getVideoMetadata=async()=>({duration:6,width:1280,height:720});getPoster=async()=>'';persistRecord=async()=>true;selectRecord=async record=>{current=record;};},
   deferSave:promise=>{getVideoMetadata=()=>promise;},
   setMotionSignal:signal=>{motionDetector.update=()=>signal;},
@@ -63,7 +72,7 @@ function fixture({getUserMedia,wakeRequest}={}){
   setDetectorBoxes:boxes=>{detector={detectForVideo:()=>({detections:boxes})};},
   setDetector:(onDetect=()=>{})=>{detector={detectForVideo:()=>{onDetect();return {detections:[]};}};}};`,context);
  context.testAPI.setDetector();context.testAPI.mockProcessing();
- return {api:context.testAPI,document,window,nodes,recorders,timers,setNow:value=>now=value,setFrame:pixels=>motionPixels=pixels};
+ return {api:context.testAPI,document,window,nodes,recorders,buffers,timers,setNow:value=>now=value,setFrame:pixels=>motionPixels=pixels};
 }
 
 test('concurrent camera opens use one permission request and one camera stream',async()=>{
@@ -150,18 +159,18 @@ test('wake-lock await cannot restart timers after a visibility interruption',asy
  f.document.hidden=true;f.document.dispatchEvent(new Event('visibilitychange'));
 
  let releases=0;const lock=new EventTarget();lock.release=async()=>{releases++;};wake.resolve(lock);
- await arming;await settleUntil(()=>releases===1);
+ await arming;await settleUntil(()=>releases===1);await f.recorders[0].onstop();
  assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().finishing,false);
  assert.equal([...f.timers.values()].filter(timer=>timer.kind==='interval').length,0);
  assert.equal(releases,1);assert.notEqual(f.nodes.captureStatus.textContent,'等待第一个出发的人 · 跟踪框出现后再出发');
 });
 
-test('waiting for departure never creates a recorder or expires at one minute',async()=>{
+test('waiting pre-records without saving or confirming a jump and does not expire at one minute',async()=>{
  const f=fixture();await f.nodes.armBtn.onclick();
  assert.equal(f.nodes.armLabel.textContent,'结束探测');assert.equal(f.nodes.armBtn.disabled,false);f.setNow(200000);
  for(const timer of [...f.timers.values()].filter(item=>item.kind==='interval'))timer.fn();
- assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().armed,true);assert.equal(f.api.snapshot().detectionActive,true);
- f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,false);
+ assert.equal(f.api.confirmedCount(),0);assert.equal(f.api.snapshot().armed,true);assert.equal(f.api.snapshot().detectionActive,true);
+ f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,false);await f.recorders[0].onstop();assert.equal(f.api.snapshot().records.length,0);
 });
 test('automatic video completion retains the tail and leaves detection active',async()=>{
  const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);const recorder=f.recorders[0];recorder.ondataavailable({data:new Blob([new Uint8Array(250)])});
@@ -171,7 +180,7 @@ test('automatic video completion retains the tail and leaves detection active',a
  assert.equal(f.api.snapshot().records.length,1);assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,true);assert.equal(f.api.snapshot().stream.track.stops,0);
  assert.equal(f.nodes.armLabel.textContent,'结束探测');
  await f.nodes.nextJumpBtn.onclick();assert.equal(f.api.snapshot().armed,true);
- f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armLabel.textContent,'开始探测');
+ f.nodes.armBtn.onclick();await f.recorders.at(-1).onstop();assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armLabel.textContent,'开始探测');
 });
 
 test('zooming while waiting suppresses motion-triggered recording and inference until the image settles',async()=>{
@@ -181,12 +190,12 @@ test('zooming while waiting suppresses motion-triggered recording and inference 
  f.api.setDetector(()=>inferences++);f.api.setMotion(true);
  const zoom=f.api.zoom(2);await settleUntil(()=>constraints===1);
  for(const now of [1500,2000,3000]){f.setNow(now);f.api.detectLoop();}
- assert.equal(f.recorders.length,0);assert.equal(inferences,0);assert.equal(f.api.snapshot().motionSince,null);
+ assert.equal(f.api.confirmedCount(),0);assert.equal(inferences,0);assert.equal(f.api.snapshot().motionSince,null);
  applied.resolve();await zoom;
- f.setNow(3999);f.api.detectLoop();assert.equal(f.recorders.length,0);assert.equal(inferences,0);
+ f.setNow(3999);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);assert.equal(inferences,0);
  // Sustained subject motion may start a recording once the zoom has settled.
  f.setNow(4001);f.api.detectLoop();f.setNow(4501);f.api.detectLoop();
- assert.equal(f.recorders.length,1);assert.equal(inferences,2);
+ assert.equal(f.api.confirmedCount(),1);assert.equal(inferences,2);
  f.api.finishCapture('manual',true);await f.recorders[0].onstop();
 });
 
@@ -222,16 +231,16 @@ test('a zoom completion from a closed camera cannot change the new camera or its
 test('first two seconds cannot trigger; continuous confirmation starts only afterwards',async()=>{
  const f=fixture();await f.api.armCapture();f.api.setMotion(true);
  for(const time of [1200,1600,2200,2800,2999]){f.setNow(time);f.api.detectLoop();}
- assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().motionSince,null);
- f.setNow(3000);f.api.detectLoop();assert.equal(f.recorders.length,0);
- f.setNow(3349);f.api.detectLoop();assert.equal(f.recorders.length,0);
- f.setNow(3350);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ assert.equal(f.api.confirmedCount(),0);assert.equal(f.api.snapshot().motionSince,null);
+ f.setNow(3000);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
+ f.setNow(3349);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
+ f.setNow(3350);f.api.detectLoop();assert.equal(f.api.confirmedCount(),1);
 });
 test('a brief change after warmup still needs continuous confirmation',async()=>{
  const f=fixture();await f.api.armCapture();f.api.setMotion(true);f.setNow(3000);f.api.detectLoop();
  f.api.setMotion(false);f.setNow(3200);f.api.detectLoop();
- f.api.setMotion(true);f.setNow(3400);f.api.detectLoop();f.setNow(3600);f.api.detectLoop();assert.equal(f.recorders.length,0);
- f.setNow(3750);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ f.api.setMotion(true);f.setNow(3400);f.api.detectLoop();f.setNow(3600);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
+ f.setNow(3750);f.api.detectLoop();assert.equal(f.api.confirmedCount(),1);
 });
 
 test('tiny continuous image noise cannot keep a completed empty scene recording forever',async()=>{
@@ -275,18 +284,18 @@ test('tiny riders and edge-only changes remain below the five-percent start thre
  const edge=fixture();edge.setFrame(rgba(scene()));await edge.api.armCapture();
  // All four edge patches remain outside the 10% central motion area.
  for(const [i,box] of [{x:2,y:40,w:5,h:8},{x:153,y:40,w:5,h:8},{x:80,y:1,w:5,h:5},{x:80,y:84,w:5,h:5}].entries())tickMotionFrame(edge,3000+i*180,scene({edgePatch:box}));
- assert.equal(edge.recorders.length,0,'edge-only changes must not arm a recorder');
+ assert.equal(edge.api.confirmedCount(),0,'edge-only changes must not arm a recorder');
  edge.api.finishCapture('manual',true);
  const f=fixture();f.setNow(5000);f.setFrame(rgba(scene()));await f.api.armCapture();
  // A 3×7 subject occupies 0.15% of the buffer, far below the restored 5% gate.
  // It is initially hidden behind x=80, then increasingly visible.
  const rider=x=>scene({rider:{x,y:54,w:3,h:7,value:20},clipX:80});
  for(const [time,x] of [[5100,79],[5280,82],[5460,85],[5640,88],[6999,91]])tickMotionFrame(f,time,rider(x));
- assert.equal(f.recorders.length,0,'warmup cannot count toward continuous confirmation');
+ assert.equal(f.api.confirmedCount(),0,'warmup cannot count toward continuous confirmation');
  assert.equal(f.api.snapshot().motionSince,null);
- tickMotionFrame(f,7000,rider(94));assert.equal(f.recorders.length,0);
- tickMotionFrame(f,7180,rider(97));assert.equal(f.recorders.length,0);
- tickMotionFrame(f,7350,rider(100));assert.equal(f.recorders.length,0,'continuous tiny motion must not pass the new area threshold');
+ tickMotionFrame(f,7000,rider(94));assert.equal(f.api.confirmedCount(),0);
+ tickMotionFrame(f,7180,rider(97));assert.equal(f.api.confirmedCount(),0);
+ tickMotionFrame(f,7350,rider(100));assert.equal(f.api.confirmedCount(),0,'continuous tiny motion must not pass the new area threshold');
  assert.equal(f.api.snapshot().motionSince,null);f.api.finishCapture('manual',true);
 });
 
@@ -317,11 +326,11 @@ test('departure requires at least five-percent motion and a fresh 350ms confirma
  const f=fixture();await f.api.armCapture();
  const signal=ratio=>f.api.setMotionSignal({moving:true,ready:true,cameraMoving:false,changedRatio:ratio});
  signal(.0499);for(const now of [3000,4000,5000]){f.setNow(now);f.api.detectLoop();}
- assert.equal(f.recorders.length,0);assert.equal(f.api.snapshot().motionSince,null);
- signal(.05);f.setNow(5100);f.api.detectLoop();assert.equal(f.recorders.length,0);
+ assert.equal(f.api.confirmedCount(),0);assert.equal(f.api.snapshot().motionSince,null);
+ signal(.05);f.setNow(5100);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
  signal(.0499);f.setNow(5300);f.api.detectLoop();assert.equal(f.api.snapshot().motionSince,null);
- signal(.05);f.setNow(5400);f.api.detectLoop();f.setNow(5749);f.api.detectLoop();assert.equal(f.recorders.length,0);
- f.setNow(5750);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ signal(.05);f.setNow(5400);f.api.detectLoop();f.setNow(5749);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
+ f.setNow(5750);f.api.detectLoop();assert.equal(f.api.confirmedCount(),1);
  f.api.finishCapture('manual',true);await f.recorders[0].onstop();
 });
 
@@ -331,7 +340,7 @@ test('stationary-scene illumination flicker must not create a recording',async()
   const frame=new Uint8Array(still);if(lit)for(let x=55;x<58;x++)frame[35*160+x]+=36;
   tickMotionFrame(f,time,frame);
  }
- assert.equal(f.recorders.length,0,'three adjacent flickering pixels in a stationary scene must not start recording');
+ assert.equal(f.api.confirmedCount(),0,'three adjacent flickering pixels in a stationary scene must not start recording');
  f.api.finishCapture('manual',true);
 });
 
@@ -339,10 +348,10 @@ test('waiting for camera permission cannot consume the two-second motion warmup'
  const request=deferred();let calls=0;const f=fixture({getUserMedia:()=>{calls++;return request.promise;}});
  f.api.setMotion(true);const arming=f.api.armCapture();await settleUntil(()=>calls===1);
  f.setNow(10000);request.resolve(fakeStream());await arming;
- for(const now of [10350,11999]){f.setNow(now);f.api.detectLoop();assert.equal(f.recorders.length,0,'camera startup still needs its full warmup');}
+ for(const now of [10350,11999]){f.setNow(now);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0,'camera startup still needs its full warmup');}
  assert.equal(f.api.snapshot().motionSince,null);
- f.setNow(12000);f.api.detectLoop();f.setNow(12349);f.api.detectLoop();assert.equal(f.recorders.length,0);
- f.setNow(12350);f.api.detectLoop();assert.equal(f.recorders.length,1);
+ f.setNow(12000);f.api.detectLoop();f.setNow(12349);f.api.detectLoop();assert.equal(f.api.confirmedCount(),0);
+ f.setNow(12350);f.api.detectLoop();assert.equal(f.api.confirmedCount(),1);
  f.api.finishCapture('manual',true);await f.recorders[0].onstop();
 });
 
@@ -352,4 +361,40 @@ test('the merged detection button saves an active recording and closes detection
  const recorder=f.recorders[0];recorder.ondataavailable({data:new Blob([new Uint8Array(250)])});
  f.nodes.armBtn.onclick();assert.equal(f.api.snapshot().detectionActive,false);assert.equal(recorder.state,'inactive');
  await recorder.onstop();assert.equal(f.api.snapshot().records.length,1);assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armLabel.textContent,'开始探测');
+});
+
+test('pre-roll starts before confirmation and late person detection cannot move the saved clip start',async()=>{
+ const f=fixture();await f.api.armCapture();
+ assert.equal(f.recorders.length,1);assert.equal(f.api.confirmedCount(),0);
+ const recorder=f.recorders[0];recorder.ondataavailable({data:new Blob([new Uint8Array(200)])});
+ f.setNow(4000);f.api.startMotionRecording([]);
+ f.api.setDetectorBoxes([{boundingBox:{originX:20,originY:20,width:30,height:50},categories:[{score:.9}]}]);
+ f.setNow(6000);f.api.detectLoop();
+ f.api.finishCapture('manual');await recorder.onstop();
+ const record=f.api.snapshot().records[0];
+ assert.equal(record.trimStart,0);assert.equal(record.contentStart,0);assert.equal(record.contentStartConfirmed,true);assert.equal(record.preRoll.seconds,2);
+});
+test('waiting interruption discards buffered video without saving an empty attempt',async()=>{
+ const f=fixture();await f.api.armCapture();f.recorders[0].ondataavailable({data:new Blob([new Uint8Array(200)])});
+ f.document.hidden=true;f.document.dispatchEvent(new Event('visibilitychange'));await f.recorders[0].onstop();
+ assert.equal(f.api.snapshot().records.length,0);assert.equal(f.api.snapshot().stream,null);assert.equal(f.api.snapshot().finishing,false);
+});
+test('retained duration includes pre-roll when metadata reading fails',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);
+ f.recorders[0].ondataavailable({data:new Blob([new Uint8Array(200)])});
+ f.api.deferSave(Promise.resolve().then(()=>{throw new Error('metadata failed');}));
+ f.api.finishCapture('manual');await f.recorders[0].onstop();
+ assert.equal(f.api.snapshot().records[0].duration,8);assert.equal(f.api.snapshot().records[0].trimEnd,8);
+});
+test('failed pre-roll finalization unlocks capture and allows a fresh attempt',async()=>{
+ const f=fixture();await f.api.armCapture();f.api.startMotionRecording([]);
+ f.buffers[0].finish=async()=>{throw new Error('bad fragment');};
+ f.api.finishCapture('manual');await f.recorders[0].onstop();
+ assert.equal(f.api.snapshot().finishing,false);assert.equal(f.api.snapshot().records.length,0);
+ await f.api.armCapture();assert.equal(f.api.snapshot().armed,true);assert.equal(f.recorders.length,2);
+});
+
+test('a failed encoder start restores camera and button state',async()=>{
+ const f=fixture();f.api.failRecordingStart();await f.api.armCapture();
+ assert.equal(f.api.snapshot().armed,false);assert.equal(f.api.snapshot().detectionActive,false);assert.equal(f.api.snapshot().stream,null);assert.equal(f.nodes.armBtn.disabled,false);
 });

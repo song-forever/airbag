@@ -1,3 +1,4 @@
+import { Mp4PreRoll } from './mp4-preroll.js?v=0.15.0';
 import { prepareAnalysisFrames } from './analysis-preparation.js?v=0.13.1';
 import { getTrainingContext } from './training-context.js?v=0.9.0';
 import { ComparisonPlayer } from './comparison-player.js?v=0.13.9';
@@ -16,14 +17,15 @@ const settingsStore=createSettingsStore({getStorage:()=>localStorage,appPath:new
 let {apiKey,autoAnalyze,model,attention,comparePrevious,persisted:settingsPersisted}=settingsStore.snapshot();
 let records = [], current = null, currentUrl = null, stream = null, detector = null, detectorPromise = null;
 let analysisDetector=null,analysisDetectorPromise=null;
+let preRollBuffer=null,captureStartedAt=0,motionCandidateAt=null;
 let detectionActive=false,batchExportBusy=false,clearingRecords=false;
-let armed = false, processing = false, recorder = null, chunks = [], armedAt = 0, recordingStart = 0, departureAt = null;
+let armed = false, processing = false, recorder = null, armedAt = 0, recordingStart = 0, departureAt = null;
 let armTimer = null, inferenceTimer = null, wakeLock = null, finishing = false, discardCapture = false, pendingReason = '';
 let keepScreenAwake=false,wakeLockPending=null,wakeLockGeneration=0;
 let cameraOpenPromise=null,cameraGeneration=0;
 let analysisController = null, analysisBusy = false, analysisRun = 0;
 const MIN_RECORDING_MS=6000,MAX_RECORDING_MS=45000,END_TAIL_MS=3000;
-let autoFinishAt=null,autoFinishReason='',firstPersonAt=null;
+let autoFinishAt=null,autoFinishReason='';
 let tracker = new JumpTracker({maxDurationMs:MAX_RECORDING_MS, lostGraceMs:2200,minRecordingMs:MIN_RECORDING_MS});
 const motionCanvas=document.createElement('canvas');motionCanvas.width=160;motionCanvas.height=90;
 const motionContext=motionCanvas.getContext('2d',{alpha:false,willReadFrequently:true});
@@ -45,7 +47,7 @@ function renderCameraZoom(state){
  for(const value of presets){const button=document.createElement('button');button.type='button';button.textContent=label(value);button.setAttribute('aria-label','相机变焦 '+label(value));button.setAttribute('aria-pressed',String(Math.abs(value-state.value)<Math.max(.01,state.step/2)));button.onclick=()=>cameraZoom.set(value);ui.zoomPresets.append(button);}
 }
 function resetMotionForZoom(){
- zoomQuietUntil=performance.now()+1000;motionDetector.reset();motionState=null;motionSince=null;drawTarget(null);
+ zoomQuietUntil=performance.now()+1000;motionDetector.reset();motionState=null;motionSince=null;motionCandidateAt=null;drawTarget(null);
  if(armed&&departureAt!==null){
   tracker.startFromMotion([],recordingStart);lastMotionAt=performance.now();
   if(autoFinishReason!=='max_duration'){autoFinishAt=null;autoFinishReason='';}
@@ -170,7 +172,7 @@ function renderDetectionButton() {
  ui.armBtn.classList.toggle('detecting',detectionActive);
 }
 function setCaptureControls(busy) {
- ui.armBtn.hidden=false;renderDetectionButton();ui.recordActions.hidden=!busy||!recorder;ui.importBtn.disabled=busy||processing||finishing;
+ ui.armBtn.hidden=false;renderDetectionButton();ui.recordActions.hidden=!busy||!recorder||departureAt===null;ui.importBtn.disabled=busy||processing||finishing;
  ui.reviewTab.disabled=busy||processing||finishing;
 
  ui.openCameraBtn.disabled=processing;ui.closeCameraBtn.hidden=!stream||busy;
@@ -282,19 +284,36 @@ function detectFrameChange(video) {
  const now=performance.now();
  motionState=motionDetector.update(gray,now,{learning:armed&&departureAt===null&&now-armedAt<2000});return motionState.moving&&motionState.changedRatio>=.05;
 }
-function startMotionRecording(detections) {
- const mime=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
- const options={videoBitsPerSecond:4500000};if(mime)options.mimeType=mime;
- const capture=new MediaRecorder(stream,options),captureChunks=[];let finalized=false;
- capture.ondataavailable=e=>{if(e.data.size)captureChunks.push(e.data);};
+function startPreRecording() {
+ const mime=['video/mp4;codecs=avc1.42E01E','video/mp4;codecs=avc1','video/mp4'].find(type=>MediaRecorder.isTypeSupported(type));
+ if(!mime)throw new Error('当前浏览器无法录制预录视频，请使用 iPhone Safari。');
+ const capture=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:4500000,videoKeyFrameIntervalDuration:1000});
+ const buffer=new Mp4PreRoll({keepSeconds:2});
+ let finalized=false;
+ recorder=capture;preRollBuffer=buffer;captureStartedAt=performance.now();
+ capture.ondataavailable=event=>{
+  if(recorder!==capture||!event.data.size)return;
+  buffer.append(event.data).catch(error=>{
+   if(recorder!==capture||finishing)return;
+   finishCapture('track_ended',true);toast('预录处理失败：'+error.message);
+  });
+ };
  capture.onerror=()=>{if(recorder===capture)finishCapture('track_ended');};
- capture.onstop=()=>{if(finalized||recorder!==capture)return;finalized=true;return finalizeRecording();};
- recorder=capture;chunks=captureChunks;recordingStart=performance.now();
- try{capture.start(1000);}catch(error){recorder=null;chunks=[];throw error;}
- departureAt=recordingStart;lastMotionAt=recordingStart;firstPersonAt=detections.length?recordingStart:null;autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
+ capture.onstop=()=>{
+  if(finalized||recorder!==capture)return;
+  finalized=true;return finalizeRecording();
+ };
+ try{capture.start(250);}catch(error){recorder=null;preRollBuffer=null;buffer.dispose();throw error;}
+}
+function startMotionRecording(detections) {
+ if(!recorder||recorder.state!=='recording'||departureAt!==null)return;
+ preRollBuffer.commit();
+ recordingStart=performance.now();departureAt=recordingStart;
+ lastMotionAt=recordingStart;
+ autoFinishAt=null;autoFinishReason='';tracker.startFromMotion(detections,departureAt);
  setCaptureControls(true);ui.stopBtn.textContent='■ 结束并保存';
  ui.cameraBadge.innerHTML='<i></i> RECORDING';ui.cameraBadge.classList.add('recording');
- ui.cameraHint.textContent='正在录像 · 自动结束最短 6 秒';status('已检测到画面运动，开始录像');
+ ui.cameraHint.textContent='正在录像 · 已保留出发前画面';status('已确认出发，正在保留本跳录像和预录画面');
 }
 async function armCapture() {
  if(armed||processing||finishing||analysisBusy)return;
@@ -303,19 +322,19 @@ async function armCapture() {
   await openCamera();
   if(document.hidden)throw new Error('请保持页面在前台，再点击准备。');
   if(!window.MediaRecorder)throw new Error('当前浏览器不支持录像，请使用较新的 Safari 或导入已有视频。');
-  recorder=null;chunks=[];departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
-  armed=true;detectionActive=true;autoFinishAt=null;firstPersonAt=null;clearTimeout(inferenceTimer);tracker.reset();motionDetector.reset();motionState=null;motionSince=null;lastMotionAt=null;setCaptureControls(true);keepAwake();
+  recorder=null;motionCandidateAt=null;departureAt=null;recordingStart=0;armedAt=performance.now();discardCapture=false;finishing=false;pendingReason='';
+  armed=true;detectionActive=true;autoFinishAt=null;clearTimeout(inferenceTimer);tracker.reset();motionDetector.reset();motionState=null;motionSince=null;lastMotionAt=null;startPreRecording();setCaptureControls(true);keepAwake();
   // Person detection helps follow the attempt, but must not block motion start.
   loadDetector().catch(()=>{if(armed)status('画面变化检测已就绪 · 人物跟踪暂不可用');});
   ui.stopBtn.textContent='停止侦测';ui.recordClock.textContent='侦测中';
-  ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraHint.textContent='正在侦测 · 尚未录像';status('正在侦测画面变化，检测到出发后才开始录像');
+  ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraHint.textContent='正在侦测 · 预录已开启';status('正在本机循环预录，确认出发后保存本跳');
   armTimer=setInterval(()=>{
    const now=performance.now();ui.recordClock.textContent=departureAt!==null?formatTime((now-recordingStart)/1000):'侦测中';
    if(departureAt!==null&&now-recordingStart>=MAX_RECORDING_MS)queueAutoFinish('max_duration',now);
    if(autoFinishAt!==null&&now>=autoFinishAt)finishCapture(autoFinishReason);
   },200);
   detectLoop();
- }catch(err){status(err.message,true);toast(err.message);}
+ }catch(err){if(!recorder){armed=false;detectionActive=false;closeCamera();}status(err.message,true);toast(err.message);}
  finally{processing=false;setCaptureControls(armed);}
 }
 function queueAutoFinish(reason,now){
@@ -328,7 +347,7 @@ function detectLoop() {
  try{
   const video=ui.cameraVideo;
   const zoomSettling=cameraZoom.state.busy||performance.now()<zoomQuietUntil;
-  if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，等待画面稳定 · 尚未录像';
+  if(zoomSettling&&armed&&departureAt===null)ui.cameraHint.textContent='正在变焦，预录继续 · 等待画面稳定';
   if(video.readyState>=2&&video.videoWidth&&!zoomSettling){
    const now=performance.now(),changed=detectFrameChange(video);
    // Completion uses its own threshold regardless of how recording started.
@@ -344,14 +363,15 @@ function detectLoop() {
    }catch{/* Motion detection continues if person inference fails. */}}
    if(armed&&departureAt===null){
     const warmingUp=now-armedAt<2000;
-    ui.cameraHint.textContent=warmingUp?'准备中 · 前 2 秒不触发录像':'正在侦测中央画面 · 等待持续运动';
+    ui.cameraHint.textContent=warmingUp?'准备中 · 正在预录并学习背景':'正在侦测中央画面 · 预录已开启';
+    if(!warmingUp&&motionState?.completionMoving)motionCandidateAt??=now;
+    else if(!motionState?.completionMoving)motionCandidateAt=null;
     if(!warmingUp&&changed)motionSince??=now;
     else motionSince=null;
     if(!warmingUp&&(motionState?.localDeparture||(motionSince!==null&&now-motionSince>=350))){
      try{startMotionRecording(detections);}catch(error){finishCapture('track_ended',true);toast('未能开始录像：'+error.message);return;}
     }
    }
-   if(armed&&departureAt!==null&&firstPersonAt===null&&detections.length)firstPersonAt=now;
    const info=armed&&departureAt!==null?tracker.update(detections,now):{state:'waiting',target:detections.sort((a,b)=>b.w*b.h*b.score-a.w*a.h*a.score)[0]||null};
    drawTarget(info.target);
    if(armed&&info.state==='complete'&&now-recordingStart>=MIN_RECORDING_MS)queueAutoFinish(info.reason,now);
@@ -362,7 +382,7 @@ function detectLoop() {
 }
 function finishCapture(reason='manual',discard=false) {
  if(!armed||finishing)return;
- const waiting=recorder===null;
+ const waiting=departureAt===null;
  if(reason==='interrupted'||reason==='track_ended'||(reason==='manual'&&waiting))detectionActive=false;
  finishing=true;armed=false;pendingReason=reason;discardCapture=discard;autoFinishAt=null;
  clearInterval(armTimer);clearTimeout(inferenceTimer);if(detectionActive)inferenceTimer=setTimeout(detectLoop,180);setCaptureControls(false);
@@ -387,23 +407,26 @@ async function getPoster(blob,time=0) {
  }catch{return '';}finally{reader?.dispose();}
 }
 async function finalizeRecording() {
- const didRecord=!!recorder;
- const mime=recorder?.mimeType||'video/mp4',blob=new Blob(chunks,{type:mime});chunks=[];
+ const didRecord=departureAt!==null;
+ const buffer=preRollBuffer;
+ let blob=null,retained=null;
  const elapsed=didRecord?(performance.now()-recordingStart)/1000:0;
- const departedOffset=firstPersonAt===null?0:Math.max(0,(firstPersonAt-recordingStart)/1000-.25);
  const detectedAction=goalText();const shouldAnalyze=autoAnalyze&&!!apiKey&&!!departureAt&&pendingReason!=='interrupted';
  if(!detectionActive)closeCamera();
  if(!document.hidden)keepAwake();
  try{
   if(!didRecord){status(pendingReason==='waiting_timeout'?reasons.waiting_timeout:'已停止侦测，未生成录像');return;}
-  if(discardCapture||blob.size<100){status('已取消，准备好后可以重新拍摄');return;}
-  let meta;try{meta=await getVideoMetadata(blob);}catch{meta={duration:elapsed,width:0,height:0};}
-  if(!Number.isFinite(meta.duration)||meta.duration<=0)meta.duration=elapsed;
-  const clip={id:crypto.randomUUID(),createdAt:Date.now(),source:'camera',name:'现场拍摄',blob,duration:meta.duration,width:meta.width,height:meta.height,action:detectedAction,actionMode:'auto',actionType:'待识别动作',actionDetail:'',focus:'',attention,contentStart:departedOffset,contentStartConfirmed:firstPersonAt!==null,trimStart:Math.max(0,Math.min(departedOffset,meta.duration-.5)),trimEnd:meta.duration,reason:pendingReason,note:reasons[pendingReason]||'自动检测结束',poster:'',analysis:null};
+  if(discardCapture){status('已取消，准备好后可以重新拍摄');return;}
+  retained=await buffer.finish();blob=retained.blob;
+  if(blob.size<100)throw new Error('本跳视频数据不足，请重试。');
+  const fallbackDuration=retained.duration||elapsed;
+  let meta;try{meta=await getVideoMetadata(blob);}catch{meta={duration:fallbackDuration,width:0,height:0};}
+  if(!Number.isFinite(meta.duration)||meta.duration<=0)meta.duration=fallbackDuration;
+  const clip={id:crypto.randomUUID(),createdAt:Date.now(),source:'camera',name:'现场拍摄',blob,duration:meta.duration,width:meta.width,height:meta.height,action:detectedAction,actionMode:'auto',actionType:'待识别动作',actionDetail:'',focus:'',attention,contentStart:0,contentStartConfirmed:true,preRoll:{seconds:retained.preRollSeconds,triggerOffset:Math.max(0,(departureAt-captureStartedAt)/1000-retained.startTime),motionOffset:Math.max(0,((motionCandidateAt??departureAt)-captureStartedAt)/1000-retained.startTime)},trimStart:0,trimEnd:meta.duration,reason:pendingReason,note:reasons[pendingReason]||'自动检测结束',poster:'',analysis:null};
   clip.poster=await getPoster(blob,clip.trimStart+.1);records.unshift(clip);await persistRecord(clip);await selectRecord(clip,{internal:true});setView('review');window.scrollTo({top:0,behavior:'smooth'});
   if(shouldAnalyze)setTimeout(()=>{if(current===clip)analyzeCurrent();},0);else if(autoAnalyze&&!apiKey)toast('录像已保存。请在设置中填写百炼模型 Key 后分析。');
  }catch(err){toast('录像处理失败：'+err.message);}
- finally{finishing=false;recorder=null;setCaptureControls(false);if(detectionActive){ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraBadge.classList.remove('recording');ui.cameraHint.textContent='侦测继续开启 · 点击回放页的“下一跳”可录像';ui.recordClock.textContent='侦测中';status('本跳已结束，侦测继续开启；点击回放页的“下一跳”可再次录像');}}
+ finally{buffer?.dispose();if(preRollBuffer===buffer)preRollBuffer=null;finishing=false;recorder=null;setCaptureControls(false);if(detectionActive){ui.cameraBadge.innerHTML='<i></i> DETECTING';ui.cameraBadge.classList.remove('recording');ui.cameraHint.textContent='侦测继续开启 · 点击回放页的“下一跳”可录像';ui.recordClock.textContent='侦测中';status('本跳已结束，侦测继续开启；点击回放页的“下一跳”可再次录像');}}
 }
 async function importVideo(file) {
  if(!file)return;
@@ -537,7 +560,7 @@ async function extractFrames(record,signal) {
  const reader=await openVideoReader(record.blob,{signal}),v=reader.video;
  try {
   const localDetector=await prepareAnalysisDetector(signal);
-  if(!record.contentStartConfirmed){
+  if(!record.preRoll&&!record.contentStartConfirmed){
    const contentStart=await findContentStart(v,start,end,signal,localDetector);
    if(typeof contentStart==='number'&&contentStart>start+.05&&end-contentStart>=.5){
     start=contentStart;duration=end-start;record.trimStart=start;record.contentStart=start;
