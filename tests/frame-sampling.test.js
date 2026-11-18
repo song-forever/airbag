@@ -100,14 +100,13 @@ test('a provided air window receives dense frames and sparse context in one sequ
   assert.ok(before[1] - before[0] > 0.5);
 });
 
-test('fallback is explicitly labelled and concentrates frames in the middle-to-late clip', () => {
+test('an unlocated jump keeps the full seekable clip instead of guessing a middle-to-late interval', () => {
   const result = getAdaptiveFrameTimes(6.205011);
   assert.equal(result.windowSource, 'fallback');
-  assert.ok(Math.abs(result.denseWindow.start - (0.01 + 6.075 * 0.35)) < 0.0010000001);
-  assert.ok(Math.abs(result.denseWindow.end - (0.01 + 6.075 * 0.85)) < 0.0010000001);
-  assert.ok(result.denseFrameCount > result.beforeFrameCount + result.afterFrameCount);
-  const gaps = result.times.slice(1).map((time, index) => Number((time - result.times[index]).toFixed(3)));
-  assert.ok(Math.max(...gaps) > Math.min(...gaps) * 3, 'does not silently return uniform full-clip sampling');
+  assert.deepEqual(result.denseWindow, { start: .01, end: 6.085 });
+  assert.equal(result.beforeFrameCount, 0);
+  assert.equal(result.afterFrameCount, 0);
+  assert.equal(result.denseFrameCount, 64);
   assertValidTimes(result.times, 6.205011);
 });
 

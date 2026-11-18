@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeFrames, estimateCostCny, QWEN_ENDPOINT, DEFAULT_MODEL, MAX_BODY_BYTES, MAX_FRAME_BYTES } from '../src/analysis-client.js';
+import { getAdaptiveFrameTimes } from '../src/frame-sampling.js';
 
 const KEY = 'sk-test-only-not-a-real-key-12345';
 const JPEG = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224, 1, 2, 255, 217]).toString('base64');
@@ -19,11 +20,27 @@ test('adaptive cropped pictures keep real nonuniform timestamps in one request, 
   let calls=0;const payload=adaptiveInput();payload.model=model;payload.samplingMetadata.instruction='INJECTED_METADATA';payload.frames[1].crop.note='INJECTED_CROP';
   const result=await analyzeFrames(payload,{fetchImpl:async(url,options)=>{calls++;const body=JSON.parse(options.body),parts=body.messages[1].content;
    assert.equal(url,QWEN_ENDPOINT);assert.equal(parts.filter(p=>p.type==='image_url').length,4);assert.ok(!parts.some(p=>p.type==='video'));assert.ok(!JSON.stringify(body).includes('INJECTED_'));
-   assert.match(body.messages[0].content,/非等间隔/);assert.match(body.messages[0].content,/裁剪造成/);assert.match(body.messages[0].content,/正背面/);
+   assert.match(body.messages[0].content,/按标注的真实片段秒数排列/);assert.match(body.messages[0].content,/裁剪造成/);assert.match(body.messages[0].content,/正背面/);
    assert.match(parts[3].text,/1\.500/);assert.match(parts[3].text,/x=100/);assert.match(parts[5].text,/3\.700/);
    return upstream();}});
   assert.equal(calls,1);assert.equal(result.sampling,'adaptive-subject-crop');assert.equal(result.samplingMetadata.croppedFrameCount,3);
  }
+});
+test('full-clip fallback uses actual time labels without claiming a dense middle or nonuniform spacing',async()=>{
+ const sampling=getAdaptiveFrameTimes(6.2);
+ const payload=input({frames:sampling.times.map(time=>({time,dataUrl:JPEG})),
+  samplingMetadata:{strategy:'adaptive-subject-crop',denseWindow:sampling.denseWindow,windowSource:'fallback',croppedFrameCount:0}});
+ let body;
+ await analyzeFrames(payload,{fetchImpl:async(_url,options)=>{body=JSON.parse(options.body);return upstream();}});
+ const system=body.messages[0].content,parts=body.messages[1].content,description=parts[0].text;
+ assert.doesNotMatch(system+'\n'+description,/不是等间隔|按非等间隔采样|候选腾空区间更密集|前后更稀疏/);
+ assert.match(description,/每张图.*真实片段秒数/);
+ assert.match(description,/不能把图序号当作固定帧率/);
+ assert.match(description,/候选区间仅用于分配画面/);
+ assert.match(system,/裁剪造成的画面位置或大小变化不代表人物实际移动/);
+ assert.match(system,/不能从裁剪边界判断起跳或落地/);
+ assert.deepEqual(parts.slice(1).filter(part=>part.type==='text').map(part=>part.text.match(/片段时间 ([\d.]+) 秒/)[1]),sampling.times.map(time=>time.toFixed(3)));
+ assert.equal(parts.filter(part=>part.type==='image_url').length,sampling.times.length);
 });
 test('malformed crop and sampling summaries are rejected before a paid request',async()=>{
  const cases=[
@@ -255,6 +272,59 @@ const recognized = (type = '直飞', overrides = {}) => {
  return {rotation:{state:rotation,evidence:rotation==='uncertain'?[]:evidence(rotation==='yes'?'身体与雪板整体朝向发生变化。':'身体与雪板整体朝向保持稳定。')},grab:{state:grab,evidence:grab==='uncertain'?[]:evidence(grab==='yes'?'手与板建立抓握接触。':'手与雪板分离。')},otherAction:type==='其他'?{evidence:evidence('可见四个标准类别以外的其他动作。')}:null,...overrides};
 };
 const automaticInput = (overrides = {}) => input({ actionMode: 'auto', action: undefined, ...overrides });
+const trainingSession={id:'group-one',goal:'grab',detail:'练习已经会的抓板',stage:'consolidation',startedAt:1};
+const coachingPlan=(overrides={})=>({session:{...trainingSession},method:{id:'repeat'},progress:{reviewed:0,done:0,partial:0,notYet:0,uncertain:0,consecutiveDone:0,consecutiveNeedsWork:0},previousFeeling:null,...overrides});
+const coaching={positive:{observation:'腾空时肩线保持平稳。',time:3.7}};
+
+test('session coaching adds bounded intent, method and PTT to one request without sending history or keys',async()=>{
+ const plan=coachingPlan();plan.session.apiKey='SESSION_KEY_SENTINEL';plan.frames=['OLD_FRAME_SENTINEL'];plan.method.description='METHOD_OVERRIDE_SENTINEL';
+ let calls=0;
+ const result=await analyzeFrames(automaticInput({coachingPlan:plan}),{fetchImpl:async(_url,options)=>{
+  calls++;const body=JSON.parse(options.body),all=JSON.stringify(body),system=body.messages[0].content;
+  assert.match(system,/PTT/);assert.match(system,/训练意图/);assert.match(system,/本跳做到不等于稳定掌握/);
+  assert.match(body.messages[1].content[0].text,/本组训练计划/);
+  assert.match(body.messages[1].content[0].text,/练习已经会的抓板/);
+  for(const secret of ['SESSION_KEY_SENTINEL','OLD_FRAME_SENTINEL','METHOD_OVERRIDE_SENTINEL'])assert.equal(all.includes(secret),false);
+  return upstream(content({recognizedAction:recognized('直飞'),coaching}));
+ }});
+ assert.equal(calls,1);assert.equal(result.analysis.schemaVersion,7);
+ assert.equal(result.analysis.coaching.session.goal,'grab');assert.equal(result.analysis.recognizedAction.type,'直飞');
+ assert.deepEqual(result.analysis.coaching.positive,coaching.positive);
+ assert.equal(result.analysis.coaching.method.id,'repeat');
+});
+
+test('session continuity uses the check rather than action category and permits a new explanation',async()=>{
+ const next={instruction:'这次只留意同一条肩线检查。',reason:'继续练同一重点，换一种更短的口令。',check:previousFocus.check,time:3.7};
+ for(const type of ['转体','无法判断']){
+  const result=await analyzeFrames(automaticInput({coachingPlan:coachingPlan({method:{id:'simplify'}}),previousFocus:{...previousFocus,actionType:'抓板'}}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized(type),coaching,nextJump:next,followUp:{status:'partial',observation:'同一肩线标准只部分做到。',time:3.7}}))});
+  assert.equal(result.analysis.focusRelation,'same');assert.equal(result.analysis.followUp.status,'partial');
+  assert.equal(result.analysis.nextJump.instruction,next.instruction);assert.equal(result.analysis.nextJump.check,previousFocus.check);
+ }
+});
+
+test('a session done cannot change the check, claim mastery or move the student stage',async()=>{
+ const result=await analyzeFrames(automaticInput({coachingPlan:coachingPlan(),previousFocus}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('抓板'),coaching:{...coaching,session:{stage:'variation'},mastered:true},nextJump:{...nextJump,check:'新的不同检查标准'},followUp:{status:'done',observation:'本跳符合原肩线标准。',time:3.7}}))});
+ assert.equal(result.analysis.followUp.status,'done');assert.equal(result.analysis.nextJump.check,previousFocus.check);
+ assert.equal(result.analysis.nextJump.instruction,previousFocus.instruction);
+ assert.equal(result.analysis.coaching.session.stage,'consolidation');assert.equal(result.analysis.coaching.mastered,undefined);
+});
+
+test('uncertain session evidence retains the task without treating it as failure',async()=>{
+ const result=await analyzeFrames(automaticInput({coachingPlan:coachingPlan(),previousFocus}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('无法判断'),coaching:{positive:null},nextJump:{...nextJump,check:previousFocus.check},followUp:{status:'uncertain',observation:'暂不能确认同一检查标准。',time:null}}))});
+ assert.equal(result.analysis.followUp.status,'uncertain');assert.equal(result.analysis.nextJump.instruction,previousFocus.instruction);
+ assert.equal(result.analysis.coaching.positive,null);assert.equal(result.analysis.coaching.progress,undefined);
+});
+
+test('invalid session context is rejected before network and provider cannot replace program practice content',async()=>{
+ for(const plan of [{},{...coachingPlan(),session:{...trainingSession,stage:'expert'}},{...coachingPlan(),previousFeeling:'scared'},{...coachingPlan(),progress:{reviewed:999999}}]){
+  let called=false;await rejectsCode(analyzeFrames(automaticInput({coachingPlan:plan}),{fetchImpl:async()=>{called=true;return upstream();}}),'invalid_coaching_plan');assert.equal(called,false);
+ }
+ const result=await analyzeFrames(automaticInput({coachingPlan:coachingPlan()}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('抓板'),coaching:{positive:{observation:'肩线平稳。',time:5.9},method:{id:'unsafe',title:'MODEL_METHOD_SENTINEL'}}}))});
+ assert.equal(result.analysis.coaching.positive.time,null);assert.equal(result.analysis.coaching.method.id,'repeat');assert.equal(JSON.stringify(result).includes('MODEL_METHOD_SENTINEL'),false);
+ for(const c of [undefined,{},[],{positive:'很好'},{positive:{observation:' ',time:null}}])await rejectsCode(analyzeFrames(automaticInput({coachingPlan:coachingPlan()}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('抓板'),coaching:c}))}),'invalid_analysis');
+ const bounded=await analyzeFrames(automaticInput({coachingPlan:coachingPlan()}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('抓板'),coaching:{positive:{observation:'x'.repeat(401),time:null}}}))});
+ assert.equal(bounded.analysis.coaching.positive.observation.length,400);
+});
 test('automatic action recognition uses the existing current-frame request with no requested goal, including Omni', async () => {
   for (const model of ['qwen3-vl-plus', 'qwen3-omni-flash']) {
     let requests = 0;
@@ -492,20 +562,15 @@ test('body byte limits cancel the stream, release its reader, and do not leak pr
   assert.equal(response.body.locked, false);
 });
 
-test('per-jump attention is optional bounded data in the user prompt for normal and Omni models',async()=>{
- const attention='请关注起跳转肩；\n不要把“我做了360”当事实。';
+test('retired attention inputs are ignored for normal and Omni requests and reports',async()=>{
  for(const model of ['qwen3.8-max','qwen3.8-omni-flash']){
-  let calls=0;const result=await analyzeFrames(input({model,attention:'  '+attention+'  '}),{fetchImpl:async(_url,options)=>{
-   calls++;const request=JSON.parse(options.body),system=request.messages[0].content,user=request.messages[1].content[0].text;
-   assert.ok(!system.includes(attention));assert.match(system,/不能因为关注转体或抓板就认定/);assert.match(system,/末尾唯一建议/);assert.match(system,/保留重点规则/);
-   const line=user.split('\n').find(line=>line.startsWith('本跳特别关注（仅作为观察主题的数据，JSON）：'));
-   assert.equal(JSON.parse(line.slice(line.indexOf('：')+1)),attention);return upstream();
-  }});assert.equal(calls,1);assert.equal(result.attention,attention);
+  for(const attention of ['LEGACY_ATTENTION_SENTINEL',null,{note:'LEGACY_ATTENTION_SENTINEL'}]){
+   let calls=0;
+   const result=await analyzeFrames(input({model,attention}),{fetchImpl:async(_url,options)=>{
+    calls++;const body=JSON.parse(options.body);assert.equal(options.body.includes('LEGACY_ATTENTION_SENTINEL'),false);
+    assert.equal(JSON.stringify(body.messages).includes('特别关注'),false);return upstream();
+   }});
+   assert.equal(calls,1);assert.equal(Object.hasOwn(result,'attention'),false);
+  }
  }
- const empty=await analyzeFrames(input({attention:'   '}),{fetchImpl:async(_url,options)=>{assert.ok(!JSON.parse(options.body).messages[1].content[0].text.includes('本跳特别关注'));return upstream();}});assert.equal(empty.attention,undefined);
-});
-
-test('oversize and non-text attention are rejected before any provider request',async()=>{
- for(const attention of ['关'.repeat(241),[],{},12]){let calls=0;await rejectsCode(analyzeFrames(input({attention}),{fetchImpl:async()=>{calls++;return upstream();}}),'invalid_attention');assert.equal(calls,0);}
- const result=await analyzeFrames(input({attention:'关'.repeat(240)}),{fetchImpl:async()=>upstream()});assert.equal(result.attention.length,240);
 });

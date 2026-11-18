@@ -14,7 +14,7 @@ const store = (storage, appPath = '/airbag/') => createSettingsStore({ getStorag
 test('settings and a valid key survive a new store on the same app path', () => {
   const storage = memoryStorage(), first = store(storage);
   first.update({ apiKey: '  ' + key + '  ', model: 'qwen3-vl-plus', autoAnalyze: true, other: 'not saved' });
-  assert.deepEqual(store(storage).snapshot(), { apiKey: key, model: 'qwen3-vl-plus', autoAnalyze: true, comparePrevious: false, attention: '', persisted: true });
+  assert.deepEqual(store(storage).snapshot(), { apiKey: key, model: 'qwen3-vl-plus', autoAnalyze: true, comparePrevious: false, persisted: true });
   assert.deepEqual(Object.keys(JSON.parse(storage.getItem(first.storageKey))).sort(), ['apiKey', 'autoAnalyze', 'comparePrevious', 'model', 'version']);
 });
 
@@ -42,7 +42,7 @@ test('explicit key deletion persists, disables auto analysis and preserves model
   const storage = memoryStorage(), settings = store(storage);
   settings.update({ apiKey: key, model: 'qwen3-vl-plus', autoAnalyze: true });
   settings.update({ apiKey: '   ', autoAnalyze: true });
-  assert.deepEqual(store(storage).snapshot(), { apiKey: '', model: 'qwen3-vl-plus', autoAnalyze: false, comparePrevious: false, attention: '', persisted: true });
+  assert.deepEqual(store(storage).snapshot(), { apiKey: '', model: 'qwen3-vl-plus', autoAnalyze: false, comparePrevious: false, persisted: true });
   assert.ok(![...storage.values.values()].some(value => value.includes(key)));
 });
 
@@ -59,7 +59,7 @@ test('invalid cached fields are discarded and missing keys never enable automati
   const storage = memoryStorage(), settings = store(storage);
   for (const apiKey of ['', 'sk-short', null, {}]) {
     storage.setItem(settings.storageKey, JSON.stringify({ version: 1, apiKey, model: 'not-supported', autoAnalyze: true }));
-    assert.deepEqual(store(storage).snapshot(), { apiKey: '', model: DEFAULT_MODEL, autoAnalyze: false, comparePrevious: false, attention: '', persisted: true });
+    assert.deepEqual(store(storage).snapshot(), { apiKey: '', model: DEFAULT_MODEL, autoAnalyze: false, comparePrevious: false, persisted: true });
   }
   for (const broken of ['{', 'null', '[]', '{"version":99,"apiKey":"' + key + '"}']) {
     storage.setItem(settings.storageKey, broken);
@@ -83,18 +83,40 @@ test('key syntax matches the supported request format', () => {
   for (const invalid of ['', 'short', 'x'.repeat(257), 'sk-local-test-only/extra', 'sk-local-test-only\n']) assert.equal(isValidApiKey(invalid), false);
 });
 
-test('persistent attention and comparison survive reload and key deletion without requiring a key',()=>{
- const storage=memoryStorage(),settings=store(storage);assert.equal(settings.hasAttentionPreference(),false);
- settings.update({attention:'持续关注起跳转肩',comparePrevious:true});const reopened=store(storage);
- assert.equal(reopened.hasAttentionPreference(),true);assert.equal(reopened.snapshot().attention,'持续关注起跳转肩');assert.equal(reopened.snapshot().comparePrevious,true);
- reopened.update({apiKey:key,autoAnalyze:true});reopened.update({apiKey:''});const clearedKey=store(storage);
- assert.equal(clearedKey.snapshot().attention,'持续关注起跳转肩');assert.equal(clearedKey.snapshot().comparePrevious,true);
- clearedKey.update({attention:'',comparePrevious:false});const cleared=store(storage);assert.equal(cleared.hasAttentionPreference(),true);assert.equal(cleared.snapshot().attention,'');assert.equal(cleared.snapshot().comparePrevious,false);
+test('comparison survives reload and key deletion while removed attention updates are ignored',()=>{
+ const storage=memoryStorage(),settings=store(storage);
+ settings.update({attention:'已移除的关注内容',comparePrevious:true});const reopened=store(storage);
+ assert.equal(reopened.snapshot().comparePrevious,true);
+ assert.equal(Object.hasOwn(reopened.snapshot(),'attention'),false);
+ assert.equal(Object.hasOwn(reopened,'hasAttentionPreference'),false);
+ reopened.update({apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true});
+ assert.deepEqual(store(storage).snapshot(),{apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true,persisted:true});
+ reopened.update({apiKey:''});const clearedKey=store(storage);
+ assert.deepEqual(clearedKey.snapshot(),{apiKey:'',model:'qwen3-vl-plus',autoAnalyze:false,comparePrevious:true,persisted:true});
+ assert.equal(Object.hasOwn(JSON.parse(storage.getItem(settings.storageKey)),'attention'),false);
 });
 
-test('legacy settings keep the attention migration opportunity until explicitly set',()=>{
- const storage=memoryStorage(),settings=store(storage);storage.setItem(settings.storageKey,JSON.stringify({version:1,apiKey:key,model:DEFAULT_MODEL,autoAnalyze:true}));
- const old=store(storage);assert.equal(old.hasAttentionPreference(),false);old.update({model:'qwen3-vl-plus'});assert.equal(store(storage).hasAttentionPreference(),false);
- old.update({attention:''});assert.equal(store(storage).hasAttentionPreference(),true);
- old.update({attention:'有效关注'});old.update({attention:'关'.repeat(241),comparePrevious:'false'});assert.equal(store(storage).snapshot().attention,'有效关注');assert.equal(store(storage).snapshot().comparePrevious,false);
+test('legacy attention is removed from settings on load without losing credentials or modifying report storage',()=>{
+ const storage=memoryStorage(),settings=store(storage);
+ const history='{"attention":"历史报告内容应保留","video":"local-video"}';
+ storage.setItem('historical-report',history);
+ storage.setItem(settings.storageKey,JSON.stringify({version:1,apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true,attention:'旧的持续关注'}));
+ const restored=store(storage);
+ assert.deepEqual(restored.snapshot(),{apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true,persisted:true});
+ assert.deepEqual(JSON.parse(storage.getItem(settings.storageKey)),{version:1,apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true});
+ assert.equal(storage.getItem('historical-report'),history);
+});
+
+test('failed legacy cleanup preserves usable settings in memory and never restores attention',()=>{
+ const storage=memoryStorage(),settings=store(storage);
+ const legacy={version:1,apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true,attention:'旧关注内容'};
+ storage.setItem(settings.storageKey,JSON.stringify(legacy));
+ storage.setItem=()=>{throw new Error('QuotaExceededError');};
+ const restored=store(storage);
+ assert.deepEqual(restored.snapshot(),{apiKey:key,model:'qwen3-vl-plus',autoAnalyze:true,comparePrevious:true,persisted:false});
+ assert.equal(Object.hasOwn(restored.snapshot(),'attention'),false);
+ assert.deepEqual(JSON.parse(storage.getItem(settings.storageKey)),legacy);
+ assert.equal(restored.update({comparePrevious:false,attention:'不能重新加入'}).apiKey,key);
+ assert.equal(restored.snapshot().comparePrevious,false);
+ assert.equal(Object.hasOwn(restored.snapshot(),'attention'),false);
 });

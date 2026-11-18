@@ -6,6 +6,9 @@ const knownLegacyTypes=actionTypes.slice(0,4);
 
 /** Exact goals keep different tricks, directions and explicit user focuses apart. */
 export function goalKeyForRecord(record){
+ const session=normalizeTrainingSession(record?.trainingSession);
+ if(session)return JSON.stringify(['session',session.id]);
+ if(record?.trainingSession!=null)return JSON.stringify(['invalid-session',String(record?.id??'')]);
  if(record?.actionMode==='auto')return JSON.stringify(['auto']);
  return JSON.stringify([
   goalText(record?.actionType)||goalText(record?.action),
@@ -15,8 +18,9 @@ export function goalKeyForRecord(record){
 }
 
 function focusSnapshot(value,record){
+ const attemptTime=trainingAttemptTime(record);
  if(!object(value)||typeof value.sourceId!=='string'||!value.sourceId.trim()||value.sourceId.length>256||value.sourceId===record?.id
-  ||!Number.isFinite(value.sourceCreatedAt)||value.sourceCreatedAt<0||!Number.isFinite(record?.createdAt)||value.sourceCreatedAt>=record.createdAt)return null;
+  ||!Number.isFinite(value.sourceCreatedAt)||value.sourceCreatedAt<0||attemptTime===null||value.sourceCreatedAt>=attemptTime)return null;
  const instruction=cueText(value.instruction,160),check=cueText(value.check,200);
  if(!instruction||!check||(Object.hasOwn(value,'actionType')&&!actionTypes.includes(value.actionType)))return null;
  return {sourceId:value.sourceId,sourceCreatedAt:value.sourceCreatedAt,instruction,check,...(Object.hasOwn(value,'actionType')?{actionType:value.actionType}:{})};
@@ -32,30 +36,41 @@ function sourceActionType(candidate){
 
 /** Freeze this returned snapshot only after a successful analysis of the record. */
 export function getTrainingContext(record,records=[]){
+ const session=normalizeTrainingSession(record?.trainingSession),attemptTime=trainingAttemptTime(record);
  const goalKey=goalKeyForRecord(record),empty={goalKey,previousFocus:null},automatic=record?.actionMode==='auto';
+ const finish=context=>session?{...context,coachingPlan:buildCoachingPlan(record,records,context.previousFocus)}:context;
+ if(record?.trainingSession!=null&&!session)return empty;
  const saved=record?.trainingContext;
- if(object(saved)&&saved.goalKey===goalKey&&Object.hasOwn(saved,'previousFocus')){
-  if(saved.previousFocus===null)return empty;
+ const savedSession=normalizeTrainingSession(saved?.coachingPlan?.session);
+ if(object(saved)&&saved.goalKey===goalKey&&Object.hasOwn(saved,'previousFocus')
+  &&(!session||JSON.stringify(savedSession)===JSON.stringify(session))){
+  if(saved.previousFocus===null)return finish(empty);
   const previousFocus=focusSnapshot(saved.previousFocus,record);
-  if(previousFocus)return {goalKey,previousFocus};
+  if(previousFocus)return finish({goalKey,previousFocus});
  }
- if(!Number.isFinite(record?.createdAt))return empty;
- const earlier=(Array.isArray(records)?records:[]).filter(item=>object(item)&&item.id!==record.id&&Number.isFinite(item.createdAt)&&item.createdAt>=0&&item.createdAt<record.createdAt)
-  .sort((a,b)=>b.createdAt-a.createdAt||(String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0));
+ if(attemptTime===null)return finish(empty);
+ const earlier=(Array.isArray(records)?records:[]).filter(item=>object(item)&&item.id!==record.id&&trainingAttemptTime(item)!==null&&trainingAttemptTime(item)<attemptTime)
+  .sort((a,b)=>trainingAttemptTime(b)-trainingAttemptTime(a)||(String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0));
  for(let index=0;index<earlier.length;){
-  let end=index+1;while(end<earlier.length&&earlier[end].createdAt===earlier[index].createdAt)end++;
+  let end=index+1;while(end<earlier.length&&trainingAttemptTime(earlier[end])===trainingAttemptTime(earlier[index]))end++;
   const sameTime=earlier.slice(index,end);
   // A changed goal ends the run of related attempts, even if it has no report.
   // Equal timestamps cannot establish which goal came last, so also reset.
-  if(!automatic&&sameTime.some(item=>goalKeyForRecord(item)!==goalKey))break;
+  if(!automatic&&!session&&sameTime.some(item=>goalKeyForRecord(item)!==goalKey))break;
   for(const candidate of sameTime){
+   const candidateSession=normalizeTrainingSession(candidate.trainingSession);
+   if(session?JSON.stringify(candidateSession)!==JSON.stringify(session):candidate.trainingSession!=null)continue;
    const report=candidate.analysis;
    if(!object(report)||(Object.hasOwn(report,'trainingGoalKey')&&report.trainingGoalKey!==goalKeyForRecord(candidate)))continue;
+   if(session&&report.trainingGoalKey!==goalKey)continue;
    const next=report.analysis?.nextJump;
-   const previousFocus=focusSnapshot({sourceId:candidate.id,sourceCreatedAt:candidate.createdAt,instruction:next?.instruction,check:next?.check,...(automatic?{actionType:sourceActionType(candidate)}:{})},record);
-   if(previousFocus)return {goalKey,previousFocus};
+   const previousFocus=focusSnapshot({sourceId:candidate.id,sourceCreatedAt:trainingAttemptTime(candidate),instruction:next?.instruction,check:next?.check,...(automatic?{actionType:sourceActionType(candidate)}:{})},record);
+   if(previousFocus)return finish({goalKey,previousFocus});
   }
   index=end;
  }
- return empty;
+ return finish(empty);
 }
+import {normalizeTrainingSession,trainingAttemptTime} from './training-session.js?v=0.16.0';
+import {buildCoachingPlan} from './coaching-plan.js?v=0.16.0';
+

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 
 const root=new URL('../',import.meta.url),appUrl=new URL('src/app.js',root);
@@ -25,7 +26,7 @@ function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysi
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
 async function settleUntil(predicate){for(let i=0;i<60&&!predicate();i++)await Promise.resolve();assert.ok(predicate(),'expected analysis pipeline boundary');}
-function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}}}={}){
+function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}},confirmAction=()=>true}={}){
  const htmlWrites=[];
  class Element extends EventTarget{
   constructor(id=''){super();this.id=id;this.children=[];this._text='';this.hidden=false;this.disabled=false;this.value='';this.dataset={};this.style={};this.checked=false;this.paused=true;this.readyState=2;this.seeking=false;this.classList={add(){},remove(){},toggle(){}};}
@@ -41,11 +42,11 @@ function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}}}={}){
  document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-speed]'?speeds:[];
  const window=new EventTarget();window.scrollTo=()=>{};
  const events=[],requests=[],saved=[];let timerId=0;
- const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,devicePixelRatio:1,performance:{now:()=>1000},localStorage:storage,confirm:()=>true,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
+ const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,crypto:webcrypto,devicePixelRatio:1,performance:{now:()=>1000},localStorage:storage,confirm:confirmAction,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
  if(imported.getTrainingContext)globals.getTrainingContext=(...args)=>{events.push('context');return imported.getTrainingContext(...args);};
  const context=vm.createContext(globals);
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nconst originalExtractor=extractFrames;this.testAPI={
-  analyzeCurrent,selectRecord,renderAnalysis,
+  analyzeCurrent,selectRecord,renderAnalysis,importVideo,assignCurrentTraining,
   setup:(items,selected)=>{records=items;current=selected;saveSettings({apiKey:'sk-local-test-only',autoAnalyze:true});},
   provider:fn=>{analyzeFrames=fn;}, extractor:fn=>{extractFrames=fn;},
   replaceHistory:items=>{records=items;},snapshot:()=>({current,records,analysisBusy}),
@@ -54,6 +55,8 @@ function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}}}={}){
   ,reader:fn=>{openVideoReader=fn;}
   ,localDetector:fn=>{loadAnalysisDetector=fn;analysisDetector=null;analysisDetectorPromise=null;}
   ,preparer:fn=>{prepareAnalysisFrames=fn;}
+  ,metadata:fn=>{getVideoMetadata=fn;},poster:fn=>{getPoster=fn;}
+  ,training:()=>({session:trainingSession,persisted:trainingPersisted})
  };`,context);
  const api=context.testAPI;
  api.extractor(async()=>{events.push('extract');return preparedFrames;});
@@ -252,22 +255,21 @@ test('schema 6 reports render derived recognition evidence as text and preserve 
  current.analysis=report({schemaVersion:5});await f.api.selectRecord(current);assert.equal(f.nodes.actionEvidencePanel.hidden,true);
 });
 
-test('attention persists across videos and reloads until explicitly changed or cleared',async()=>{
- const storage=settingsStorage(),first=clip('first-attention',1000),second=clip('second-attention',2000),f=fixture({storage});first.attention='旧视频的观察主题';f.api.setup([second,first],second);await f.api.selectRecord(second);
- f.nodes.jumpAttentionInput.value='  持续留意提前转肩  ';f.nodes.jumpAttentionInput.oninput();await f.nodes.jumpAttentionInput.onchange();
- await f.api.analyzeCurrent();assert.equal(f.requests[0].attention,'持续留意提前转肩');assert.equal(second.analysis.attention,'持续留意提前转肩');
- await f.api.selectRecord(first);assert.equal(f.nodes.jumpAttentionInput.value,'  持续留意提前转肩  ');await f.api.analyzeCurrent();assert.equal(f.requests[1].attention,'持续留意提前转肩');
- f.nodes.jumpAttentionInput.value='改看抓板';f.nodes.jumpAttentionInput.oninput();assert.equal(second.analysis.attention,'持续留意提前转肩');
- const reopened=fixture({storage});reopened.api.setup([second,first],second);await reopened.api.selectRecord(second);assert.equal(reopened.nodes.jumpAttentionInput.value,'改看抓板');
- reopened.nodes.jumpAttentionInput.value='';reopened.nodes.jumpAttentionInput.oninput();const cleared=fixture({storage});cleared.api.setup([first],first);await cleared.api.selectRecord(first);assert.equal(cleared.nodes.jumpAttentionInput.value,'');
-});
-
-test('attention is frozen while analysis is running and restored after extraction fails',async()=>{
- const current=clip('attention-freeze',1000),f=fixture(),gate=deferred();current.attention='关注本跳舒展';f.api.setup([current],current);await f.api.selectRecord(current);f.nodes.jumpAttentionInput.value='关注本跳舒展';f.nodes.jumpAttentionInput.oninput();f.api.extractor(()=>gate.promise);
- const pending=f.api.analyzeCurrent();await settleUntil(()=>f.api.snapshot().analysisBusy);assert.equal(f.nodes.jumpAttentionInput.disabled,true);
- f.nodes.jumpAttentionInput.value='分析期间改动';f.nodes.jumpAttentionInput.oninput();assert.equal(current.attention,'关注本跳舒展');gate.resolve(preparedFrames);await pending;
- assert.equal(f.requests[0].attention,'关注本跳舒展');assert.equal(current.analysis.attention,'关注本跳舒展');assert.equal(f.nodes.jumpAttentionInput.disabled,false);
- f.api.extractor(async()=>{throw Error('提取失败');});await f.api.analyzeCurrent();assert.equal(f.nodes.jumpAttentionInput.disabled,false);assert.equal(current.analysis.attention,'关注本跳舒展');
+test('removed attention UI and legacy notes cannot enter subsequent model requests',async()=>{
+ const storage=settingsStorage(),seed=fixture({storage});seed.api.setup([],null);
+ for(const [key,value] of storage.values)if(key.startsWith('airbag-settings-v1:')){
+  storage.values.set(key,JSON.stringify({...JSON.parse(value),attention:'LEGACY_SETTINGS_ATTENTION'}));
+ }
+ const current=clip('legacy-note',1000),f=fixture({storage});current.attention='LEGACY_RECORD_ATTENTION';
+ f.api.setup([current],current);await f.api.selectRecord(current);await f.api.analyzeCurrent();
+ assert.equal(f.nodes.jumpAttentionInput,undefined);
+ assert.equal(html.includes('练习思路与学习资料'),false);
+ assert.equal(f.nodes.settingsSaveHint.textContent.includes('特别关注'),false);
+ assert.equal(Object.hasOwn(f.requests[0],'attention'),false);
+ assert.equal(Object.hasOwn(current.analysis,'attention'),false);
+ assert.equal(JSON.stringify(f.requests).includes('LEGACY_'),false);
+ const reopened=fixture({storage});reopened.api.setup([current],current);await reopened.api.selectRecord(current);
+ await reopened.api.analyzeCurrent();assert.equal(Object.hasOwn(reopened.requests[0],'attention'),false);
 });
 
 test('comparison preference restores independently of model credentials and opens without a page toggle',async()=>{
@@ -283,4 +285,76 @@ test('cleared video records retain reports while playback, trimming and new anal
  assert.equal(f.nodes.reviewVideo.hidden,true);assert.equal(f.nodes.analyzeBtn.disabled,true);assert.equal(f.nodes.applyTrimBtn.disabled,true);assert.equal(f.nodes.shareVideoBtn.disabled,true);assert.equal(f.nodes.exportReportBtn.disabled,false);
  assert.match(f.nodes.historyList.textContent,/视频已清理/);assert.equal(f.nodes.batchExportBtn.disabled,true);
  await f.api.analyzeCurrent();assert.equal(f.requests.length,0);assert.ok(item.analysis);
+});
+
+function setTraining(f,{goal='grab',detail='让熟悉的抓板更连贯',stage='consolidation'}={}){
+ f.nodes.trainingGoalSelect.value=goal;f.nodes.trainingStageSelect.value=stage;f.nodes.trainingDetailInput.value=detail;
+ f.nodes.trainingForm.onsubmit({preventDefault(){}});return f.api.training().session;
+}
+function coachedReport(session,{positive='本跳可见保持同一练习节奏',...options}={}){
+ const value=report({schemaVersion:7,...options});
+ value.analysis.coaching={session,positive:{observation:positive,time:.4},method:{id:'repeat',title:'围绕同一标准再练一次',description:'继续熟悉的动作，只检查本轮这一点。',skillTheme:'时机与协调'}};
+ return value;
+}
+
+test('training goal and stage persist independently of credentials; changed goals form a new group without rewriting history',async()=>{
+ const storage=settingsStorage(),f=fixture({storage}),old=clip('old-session',1000,{analysis:report()});f.api.setup([old],old);
+ const first=setTraining(f);assert.equal(first.goal,'grab');assert.equal(first.stage,'consolidation');assert.match(f.nodes.trainingSessionSummary.textContent,/抓板/);
+ const reopened=fixture({storage});assert.equal(reopened.api.training().session.id,first.id);assert.equal(reopened.nodes.trainingDetailInput.value,'让熟悉的抓板更连贯');
+ const other=setTraining(f,{goal:'rotation',detail:'熟悉的转体',stage:'refinement'});assert.notEqual(other.id,first.id);assert.equal(old.trainingSession,undefined);assert.ok(old.analysis);
+ const savedId=other.id;setTraining(f,{goal:'rotation',detail:'熟悉的转体',stage:'refinement'});assert.equal(f.api.training().session.id,savedId,'saving unchanged selection must not split the group');
+ f.nodes.newTrainingGroupBtn.onclick();assert.notEqual(f.api.training().session.id,savedId);assert.ok(old.analysis);
+ setTraining(f,{goal:'',detail:'',stage:'acquisition'});assert.equal(f.api.training().session,null);assert.equal(f.nodes.trainingStageSelect.disabled,true);assert.ok(old.analysis);assert.equal(f.requests.length,0);
+});
+
+test('local import snapshots the group before metadata resolves and rejects edits during that import',async()=>{
+ const f=fixture(),first=setTraining(f),gate=deferred();f.api.setup([],null);
+ f.api.metadata(()=>gate.promise);f.api.poster(async()=> '');
+ const file=Object.assign(new Blob(['video'],{type:'video/mp4'}),{name:'snapshot.mp4'}),pending=f.api.importVideo(file);
+ assert.equal(f.nodes.trainingGoalSelect.disabled,true);assert.equal(f.nodes.applyTrainingBtn.disabled,true);
+ setTraining(f,{goal:'rotation',stage:'refinement'});assert.equal(f.api.training().session.id,first.id);
+ gate.resolve({duration:4,width:720,height:1280});await pending;
+ const importedClip=f.api.snapshot().current;assert.equal(importedClip.trainingSession.id,first.id);assert.equal(importedClip.source,'import');assert.ok(Number.isFinite(importedClip.trainingJoinedAt));
+ const second=setTraining(f,{goal:'rotation',stage:'refinement'});assert.notEqual(second.id,first.id);assert.equal(importedClip.trainingSession.id,first.id);assert.match(f.nodes.recordTrainingSummary.textContent,/抓板/);assert.equal(f.requests.length,0);
+});
+
+test('assigning analyzed history requires confirmation, preserves video time, and creates one new group attempt',async()=>{
+ let approved=false,confirmations=0;const f=fixture({confirmAction:()=>{confirmations++;return approved;}}),session=setTraining(f),old=clip('assign',1000,{analysis:report()});old.practiceFeeling='harder';old.trainingContext={goalKey:'old',previousFocus:null};
+ const originalBlob=old.blob;f.api.setup([old],old);await f.api.selectRecord(old);const previousAnalysis=old.analysis;
+ assert.equal(f.nodes.assignTrainingBtn.hidden,false);await f.nodes.assignTrainingBtn.onclick();assert.equal(confirmations,1);assert.equal(old.analysis,previousAnalysis);assert.equal(old.trainingSession,undefined);
+ approved=true;await f.nodes.assignTrainingBtn.onclick();assert.equal(confirmations,2);assert.equal(old.createdAt,1000);assert.equal(old.blob,originalBlob);assert.equal(old.analysis,null);assert.equal(old.trainingContext,undefined);assert.equal(old.practiceFeeling,undefined);assert.equal(old.trainingSession.id,session.id);assert.ok(old.trainingJoinedAt>old.createdAt);assert.equal(f.nodes.assignTrainingBtn.hidden,true);assert.equal(f.api.snapshot().records.length,1);
+ old.blob=null;setTraining(f,{goal:'rotation'});await f.api.selectRecord(old);assert.equal(f.nodes.assignTrainingBtn.hidden,true,'a cleared video must not lose its only retained report through reassignment');
+});
+
+test('schema 7 shows grounded positive feedback, method and optional self-report with phase details collapsed',async()=>{
+ const f=fixture(),session=setTraining(f),marker='<img src=x onerror=alert(1)>',current=clip('coached-ui',Date.now());current.trainingSession=session;current.trainingJoinedAt=current.createdAt;
+ f.api.setup([current],current);f.api.provider(async payload=>{f.requests.push(payload);return coachedReport(session,{positive:'保持住的动作 '+marker,follow:null});});await f.api.analyzeCurrent();
+ assert.equal(f.requests[0].coachingPlan.session.id,session.id);assert.equal(current.analysis.analysis.schemaVersion,7);
+ const result=f.nodes.analysisResult,text=result.textContent;assert.match(text,/保持住的动作/);assert.match(text,/本组同一检查标准/);assert.match(text,/一次做到|下一跳开始核对/);assert.match(text,/本次练习方式/);assert.ok(!f.htmlWrites.some(value=>value.includes(marker)));
+ const details=result.children.find(child=>child.className==='stage-details');assert.ok(details);assert.notEqual(details.open,true);assert.match(details.textContent,/助滑/);assert.match(details.textContent,/腾空/);assert.ok(text.indexOf('保持住的动作')<text.indexOf('总体分析'));
+ const section=result.children.find(child=>child.className==='practice-feeling'),buttons=section.children.find(child=>child.className==='feeling-options');await buttons.children[2].onclick();assert.equal(current.practiceFeeling,'harder');assert.equal(f.requests.length,1);
+ const rendered=f.nodes.analysisResult.children.find(child=>child.className==='practice-feeling').children.find(child=>child.className==='feeling-options');assert.equal(rendered.children[2]['aria-pressed'],'true');await rendered.children[2].onclick();assert.equal(current.practiceFeeling,undefined);assert.equal(f.requests.length,1);
+});
+
+test('a delayed training assignment cannot overwrite the title of another selected clip',async()=>{
+ const f=fixture(),gate=deferred();setTraining(f);
+ const old=clip('assign-delayed',1000),other=clip('other-selected',2000,{analysis:report({type:'转体',follow:null})});f.api.setup([other,old],old);await f.api.selectRecord(old);
+ f.api.save(()=>gate.promise);const assigning=f.api.assignCurrentTraining();await f.api.selectRecord(other);assert.equal(f.nodes.clipTitle.textContent,'转体');
+ gate.resolve(true);await assigning;assert.equal(f.api.snapshot().current,other);assert.equal(f.nodes.clipTitle.textContent,'转体');assert.equal(other.trainingSession,undefined);
+});
+
+for(const outcome of ['success','failed','cancelled'])test(`practice feeling controls are usable after ${outcome} analysis completes`,async()=>{
+ const f=fixture(),session=setTraining(f),current=clip('feeling-boundary-'+outcome,Date.now()),gate=deferred();current.trainingSession=session;current.trainingJoinedAt=current.createdAt;
+ const oldReport=outcome==='success'?null:coachedReport(session,{follow:null});current.analysis=oldReport;
+ if(oldReport)current.practiceFeeling='same';
+ f.api.setup([current],current);await f.api.selectRecord(current);
+ f.api.provider(payload=>{f.requests.push(payload);return gate.promise;});
+ const pending=f.api.analyzeCurrent();await settleUntil(()=>f.requests.length===1);assert.equal(f.api.snapshot().analysisBusy,true);assert.equal(f.nodes.analysisResult.hidden,true);
+ if(outcome==='success')gate.resolve(coachedReport(session,{follow:null}));
+ else{if(outcome==='cancelled')f.nodes.cancelAnalysisBtn.onclick();gate.reject(outcome==='cancelled'?new DOMException('Cancelled','AbortError'):new Error('Provider failed'));}
+ await pending;assert.equal(f.api.snapshot().analysisBusy,false);assert.equal(f.nodes.analysisResult.hidden,false);
+ if(oldReport){assert.equal(current.analysis,oldReport);assert.equal(current.practiceFeeling,'same');}
+ const section=f.nodes.analysisResult.children.find(child=>child.className==='practice-feeling'),buttons=section.children.find(child=>child.className==='feeling-options');
+ assert.ok(buttons.children.every(button=>button.disabled===false),'settled results must release their native disabled controls');
+ await buttons.children[2].onclick();assert.equal(current.practiceFeeling,'harder');assert.equal(f.requests.length,1,'saving a feeling must not make a new model request');
 });

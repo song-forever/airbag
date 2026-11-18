@@ -17,6 +17,15 @@ test('comparison chooses the nearest earlier analyzed video of the same observed
  assert.equal(findComparisonRecord(current,[previous,current,old,other]).id,'previous');
 });
 
+test('session coaching reports remain comparable by observed action rather than the intended goal',()=>{
+ const session={id:'group-one',goal:'rotation',stage:'acquisition',detail:'',startedAt:1};
+ const current=record('current',40,{trainingSession:session}),previous=record('previous',20,{trainingSession:session});
+ for(const item of [current,previous]){item.analysis.analysis.schemaVersion=7;item.analysis.trainingGoalKey=goalKeyForRecord(item);}
+ const other=action(record('other',30),'转体');
+ assert.equal(findComparisonRecord(current,[other,previous]).id,'previous');
+ assert.deepEqual(getComparisonSegments(current,previous).map(s=>s.id),['whole','助滑','上台','起跳','腾空']);
+});
+
 test('nearest same-action comparison is independent of a frozen older training-cue source',()=>{
  const old=record('old-source',10),nearer=record('nearer',20),current=record('current',30,{trainingContext:{previousFocus:{sourceId:'old-source'}}});
  assert.equal(findComparisonRecord(current,[old,nearer]).id,'nearer');

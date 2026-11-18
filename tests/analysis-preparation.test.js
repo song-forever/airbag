@@ -37,6 +37,26 @@ test('unavailable or failing local detection keeps complete images and honestly 
   for(const draw of f.draws)assert.deepEqual(draw.slice(1,5),[0,0,720,1280]);
  }
 });
+test('missing person detections do not leave an early flight in sparse context',async()=>{
+ const f=fixture({detector:false,end:5.17});
+ f.options.detectPersons=()=>[];
+ const r=await prepareAnalysisFrames(f.video,f.options);
+ assert.equal(r.samplingMetadata.windowSource,'fallback');
+ assert.deepEqual(r.samplingMetadata.denseWindow,{start:.01,end:5.05});
+ assert.ok(r.frames.filter(frame=>frame.time>=.8&&frame.time<=1.25).length>=4);
+ assert.ok(r.frames.length<=96);
+});
+test('a short visibility track before flight is not treated as the end of the action',async()=>{
+ const f=fixture({detector:false,end:10});
+ f.options.detectPersons=v=>v.currentTime>=8.05&&v.currentTime<=8.45
+  ? [{x:.5,y:.4,w:.08,h:.15,score:.9}]:[];
+ const r=await prepareAnalysisFrames(f.video,f.options);
+ assert.equal(r.samplingMetadata.windowSource,'fallback');
+ assert.ok(r.samplingMetadata.denseWindow.start<8);
+ assert.ok(r.samplingMetadata.denseWindow.end>=9.5);
+ assert.ok(r.frames.filter(frame=>frame.time>=9.14&&frame.time<=9.25).length>=2);
+ assert.ok(r.frames.length<=96);
+});
 test('trimmed video seeks use absolute times but returned evidence times remain clip-relative',async()=>{
  const f=fixture({start:2,end:8.2}),r=await prepareAnalysisFrames(f.video,f.options);
  assert.ok(f.seeks.every(time=>time>=2.01&&time<=8.08));

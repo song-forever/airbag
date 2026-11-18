@@ -42,7 +42,7 @@ export function getScoutFrameTimes(duration) {
   return sampleTicks(startTicks, endTicks, count);
 }
 
-/** One nonuniform analysis sequence with more frames in a candidate air window. */
+/** Concentrate one sequence in a candidate window; keep the full clip if unknown. */
 export function getAdaptiveFrameTimes(duration, { window } = {}) {
   const { startTicks, endTicks } = getSamplingBounds(duration);
   const provided = window !== undefined;
@@ -54,10 +54,10 @@ export function getAdaptiveFrameTimes(duration, { window } = {}) {
   }
   const start = startTicks / 1000;
   const end = endTicks / 1000;
-  const candidate = provided ? window : {
-    start: start + (end - start) * 0.35,
-    end: start + (end - start) * 0.85,
-  };
+  // A clip can begin during an early jump or contain a long empty prefix. A
+  // fixed percentage is not evidence of flight, so an unknown window must not
+  // relegate either end of the clip to sparse context.
+  const candidate = provided ? window : { start, end };
   const candidateStart = Math.max(start, candidate.start);
   const candidateEnd = Math.min(end, candidate.end);
   if (candidateStart >= candidateEnd) {

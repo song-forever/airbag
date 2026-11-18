@@ -1,6 +1,7 @@
-import { getScoutFrameTimes, getAdaptiveFrameTimes } from './frame-sampling.js?v=0.12.0';
+import { getScoutFrameTimes, getAdaptiveFrameTimes } from './frame-sampling.js?v=0.16.2';
 import { planSubjectCrops, estimateAirborneWindow, estimateSubjectWindow } from './subject-crop.js?v=0.13.1';
 import { encodeFrame, getFrameByteBudget } from './frame-encoding.js';
+import { createMotionScout, estimateMotionEpisode } from './sampling-motion.js?v=0.16.2';
 
 const checkAbort = signal => { if (signal?.aborted) throw new DOMException('画面提取已取消。', 'AbortError'); };
 const yieldControl = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -37,15 +38,31 @@ export async function prepareAnalysisFrames(video, {
     observations.set(time, observation);
     return observation;
   }
-  if (typeof detectPersons === 'function') {
+  const motionScout = createMotionScout({ createCanvas }), motionObservations = [];
+  try {
     for (let i = 0; i < scoutTimes.length; i++) {
-      await observe(scoutTimes[i]); progress('scout', i + 1, scoutTimes.length);
+      await observe(scoutTimes[i]);
+      const motion = motionScout.observe(video, scoutTimes[i]);
+      if (motion) motionObservations.push(motion);
+      progress('scout', i + 1, scoutTimes.length);
       await yieldTask(); checkAbort(signal);
     }
-  }
+  } finally { motionScout.dispose(); }
   const candidate = estimateAirborneWindow([...observations.values()], { duration });
-  const visibleWindow = candidate || estimateSubjectWindow([...observations.values()], { duration });
-  const sampling = getAdaptiveFrameTimes(duration, visibleWindow ? { window: visibleWindow } : {});
+  const visibleWindow = candidate ? null : estimateSubjectWindow([...observations.values()], { duration });
+  // Local motion can locate a useful episode when a distant rider is too small
+  // for the person model. It is not a person box or proof of flight, and never
+  // controls cropping or recording. Ambiguous/global motion falls back safely.
+  const motionWindow = candidate || visibleWindow ? null : estimateMotionEpisode(motionObservations, { duration }).window;
+  // Visibility is a weaker cue than an observed arc: small or occluded riders
+  // can disappear from this detector before flight. Retain context on both
+  // sides, especially after the last sighting, instead of treating it as the
+  // end of the action. These margins allocate frames, not takeoff/landing times.
+  const window = candidate || (visibleWindow ? {
+    start: Math.max(0, visibleWindow.start - .6),
+    end: Math.min(duration, visibleWindow.end + 1.65),
+  } : motionWindow);
+  const sampling = getAdaptiveFrameTimes(duration, window ? { window } : {});
   for (let i = 0; i < sampling.times.length; i++) {
     const time = sampling.times[i];
     if (!observations.has(time)) await observe(time);
@@ -83,7 +100,8 @@ export async function prepareAnalysisFrames(video, {
       windowSource: candidate ? 'detected' : 'fallback',
       croppedFrameCount: frames.filter(frame => frame.crop).length,
     },
-    preparation: { scoutCount: typeof detectPersons === 'function' ? scoutTimes.length : 0,
+    preparation: { scoutCount: scoutTimes.length,
+      windowKind: candidate ? 'arc' : visibleWindow ? 'subject' : motionWindow ? 'motion' : 'clip',
       beforeFrameCount: sampling.beforeFrameCount, denseFrameCount: sampling.denseFrameCount,
       afterFrameCount: sampling.afterFrameCount, denseFps: sampling.denseFps },
   };

@@ -1,4 +1,4 @@
-import {goalKeyForRecord} from './training-context.js?v=0.9.0';
+import {goalKeyForRecord} from './training-context.js?v=0.16.0';
 
 const actionTypes=['直飞','抓板','转体','转体抓板'];
 const phases=['助滑','上台','起跳','腾空'];
@@ -6,7 +6,7 @@ const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value)
 
 function reportFor(record){
  const report=record?.analysis;
- if(!object(report)||!object(report.analysis)||![2,3,4,5,6].includes(report.analysis.schemaVersion))return null;
+ if(!object(report)||!object(report.analysis)||![2,3,4,5,6,7].includes(report.analysis.schemaVersion))return null;
  if(Object.hasOwn(report,'trainingGoalKey')&&report.trainingGoalKey!==goalKeyForRecord(record))return null;
  return report.analysis;
 }

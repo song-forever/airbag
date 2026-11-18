@@ -155,3 +155,54 @@ test('optional source action hints are whitelisted and malformed frozen hints ar
  const recovered=getTrainingContext(current,[previous]);
  assert.equal(recovered.previousFocus.sourceId,'previous');assert.equal(recovered.previousFocus.actionType,'直飞');assert.equal(JSON.stringify(recovered).includes('secret'),false);
 });
+
+const session={id:'group-one',goal:'grab',detail:'熟悉的抓板动作',stage:'consolidation',startedAt:1};
+const sessionRecord=(id,time,overrides={})=>record(id,time,{actionMode:'auto',trainingSession:{...session},trainingJoinedAt:time,...overrides});
+const sessionAnalyzed=(id,time,overrides={})=>{
+ const item=sessionRecord(id,time,overrides);
+ item.analysis={trainingGoalKey:JSON.stringify(['session',item.trainingSession.id]),analysis:{schemaVersion:7,nextJump:{...cue,reason:'可见依据',time:null},recognizedAction:{type:'抓板'},coaching:{session:item.trainingSession}}};
+ return item;
+};
+
+test('a training session has its own goal key independent of observed type',()=>{
+ const current=sessionRecord('current',20);
+ assert.equal(goalKeyForRecord(current),JSON.stringify(['session','group-one']));
+ assert.equal(goalKeyForRecord({...current,actionType:'转体'}),goalKeyForRecord(current));
+ assert.notEqual(goalKeyForRecord({...current,trainingSession:{...session,id:'another-group'}}),goalKeyForRecord(current));
+});
+
+test('session focus remains continuous across a wrong or uncertain recognition result',()=>{
+ const previous=sessionAnalyzed('previous',10,{actionType:'转体'}),current=sessionRecord('current',20,{actionType:'无法判断'});
+ const context=getTrainingContext(current,[previous]);
+ assert.equal(context.previousFocus.sourceId,'previous');
+ assert.equal(context.coachingPlan.session.goal,'grab');
+ assert.equal(context.coachingPlan.session.stage,'consolidation');
+ assert.equal(context.coachingPlan.progress.reviewed,0);
+});
+
+test('a session cannot inherit cues from another group or free practice',()=>{
+ const current=sessionRecord('current',40),other=sessionAnalyzed('other',30,{trainingSession:{...session,id:'other'}});
+ assert.equal(getTrainingContext(current,[other,analyzed('free',20)]).previousFocus,null);
+ const same=sessionAnalyzed('same',10);
+ assert.equal(getTrainingContext(current,[same,other,analyzed('free',20)]).previousFocus.sourceId,'same');
+});
+
+test('free practice does not unexpectedly adopt a session-specific prescription',()=>{
+ const current=record('free',30,{actionMode:'auto'}),old=analyzed('free-old',10,{actionMode:'auto'}),group=sessionAnalyzed('group',20);
+ assert.equal(getTrainingContext(current,[old,group]).previousFocus.sourceId,'free-old');
+});
+
+test('explicit assignment orders old clips by joined time without using future attempts',()=>{
+ const previous=sessionAnalyzed('previous',20),current=sessionRecord('old-video',5,{trainingJoinedAt:30});
+ const future=sessionAnalyzed('future',10,{trainingJoinedAt:40});
+ assert.equal(getTrainingContext(current,[future,previous]).previousFocus.sourceId,'previous');
+ current.trainingContext=getTrainingContext(current,[previous]);
+ assert.equal(getTrainingContext(current,[]).previousFocus.sourceCreatedAt,20);
+ const joined=sessionAnalyzed('joined',1,{trainingJoinedAt:25});
+ assert.equal(getTrainingContext({...current,trainingContext:undefined},[joined,previous]).previousFocus.sourceCreatedAt,25);
+});
+
+test('changed session metadata with reused ids cannot inherit a stale focus',()=>{
+ const previous=sessionAnalyzed('previous',10),current=sessionRecord('current',20,{trainingSession:{...session,goal:'rotation'}});
+ assert.equal(getTrainingContext(current,[previous]).previousFocus,null);
+});

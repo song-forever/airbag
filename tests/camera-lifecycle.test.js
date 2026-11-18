@@ -116,6 +116,17 @@ test('recorder error waits for final data and finalizes only once',async()=>{
  assert.equal(state.activeCapture,null);assert.equal(state.finishing,false);
 });
 
+test('camera recording retains its training session through delayed finalization and later goal changes',async()=>{
+ const f=fixture(),save=deferred();
+ f.nodes.trainingGoalSelect.value='grab';f.nodes.trainingStageSelect.value='consolidation';f.nodes.trainingDetailInput.value='熟悉的抓板';f.nodes.trainingForm.onsubmit({preventDefault(){}});
+ await f.api.armCapture();assert.equal(f.nodes.trainingGoalSelect.disabled,true);f.api.startMotionRecording([]);const recorder=f.recorders[0];
+ recorder.ondataavailable({data:new Blob([new Uint8Array(200)])});f.api.deferSave(save.promise);f.api.finishCapture('manual');const saving=recorder.onstop();
+ f.nodes.trainingGoalSelect.value='rotation';f.nodes.trainingStageSelect.value='refinement';f.nodes.trainingForm.onsubmit({preventDefault(){}});assert.equal(f.nodes.applyTrainingBtn.disabled,true);
+ save.resolve({duration:6,width:1280,height:720});await saving;
+ const record=f.api.snapshot().records[0];assert.equal(record.trainingSession.goal,'grab');assert.equal(record.trainingSession.stage,'consolidation');assert.ok(record.trainingJoinedAt>=record.trainingSession.startedAt);assert.ok(record.trainingJoinedAt<=record.createdAt);
+ f.nodes.trainingForm.onsubmit({preventDefault(){}});assert.equal(record.trainingSession.goal,'grab');assert.equal(record.trainingSession.stage,'consolidation');
+});
+
 test('a queued ended callback from an old stream cannot stop a new recording',async()=>{
  const f=fixture();await f.api.openCamera();const oldEnded=f.api.snapshot().stream.track.onended;
  f.api.closeCamera();await f.api.armCapture();f.api.startMotionRecording([]);oldEnded();
