@@ -3,6 +3,16 @@ const goalText=value=>typeof value==='string'?value.trim().replace(/\s+/g,' '):'
 const cueText=(value,max)=>typeof value==='string'&&value.trim()&&value.trim().length<=max?value.trim():null;
 const actionTypes=['直飞','抓板','转体','转体抓板','其他','无法判断'];
 const knownLegacyTypes=actionTypes.slice(0,4);
+const masteryLevels=['','初学','能做但不稳定','能稳定完成'];
+
+export function normalizeJumpIntent(value){
+ if(!object(value))return null;
+ const {action='',mastery=''}=value;
+ if(typeof action!=='string'||typeof mastery!=='string')return null;
+ const plannedAction=action.trim(),selfAssessment=mastery.trim();
+ if(plannedAction.length>60||!masteryLevels.includes(selfAssessment))return null;
+ return plannedAction||selfAssessment?{action:plannedAction,mastery:selfAssessment}:null;
+}
 
 /** Exact goals keep different tricks, directions and explicit user focuses apart. */
 export function goalKeyForRecord(record){

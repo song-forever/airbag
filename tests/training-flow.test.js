@@ -26,8 +26,8 @@ function clip(id,createdAt,{actionType='直飞',actionDetail='',focus='',analysi
 }
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
 async function settleUntil(predicate){for(let i=0;i<60&&!predicate();i++)await Promise.resolve();assert.ok(predicate(),'expected analysis pipeline boundary');}
-function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}},confirmAction=()=>true}={}){
- const htmlWrites=[];
+function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}},navigator={},confirmAction=()=>true}={}){
+ const htmlWrites=[],downloads=[];
  class Element extends EventTarget{
   constructor(id=''){super();this.id=id;this.children=[];this._text='';this.hidden=false;this.disabled=false;this.value='';this.dataset={};this.style={};this.checked=false;this.paused=true;this.readyState=2;this.seeking=false;this.classList={add(){},remove(){},toggle(){}};}
   set textContent(value){this._text=String(value);this.children=[];}get textContent(){return this._text+this.children.map(child=>typeof child==='string'?child:child.textContent).join('');}
@@ -37,12 +37,16 @@ function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}},confirmA
   getContext(){return {clearRect(){},drawImage(){},getImageData(){return {data:new Uint8Array(160*90*4)};}};}
  }
  const nodes=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
- const document=new EventTarget();document.hidden=false;document.body=new Element();document.getElementById=id=>nodes[id];document.createElement=tag=>new Element(tag);
+ const document=new EventTarget();document.hidden=false;document.body=new Element();document.getElementById=id=>nodes[id];document.createElement=tag=>{
+  const element=new Element(tag);
+  if(tag==='a')element.click=()=>downloads.push({url:element.href,name:element.download});
+  return element;
+ };
  const speeds=[.25,.5,1].map(speed=>{const button=new Element();button.dataset.speed=String(speed);return button;});
  document.querySelectorAll=query=>query==='[id]'?Object.values(nodes):query==='[data-speed]'?speeds:[];
  const window=new EventTarget();window.scrollTo=()=>{};
  const events=[],requests=[],saved=[];let timerId=0;
- const globals={...imported,document,window,navigator:{},console,Blob,URL,DOMException,AbortController,Event,crypto:webcrypto,devicePixelRatio:1,performance:{now:()=>1000},localStorage:storage,confirm:confirmAction,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
+ const globals={...imported,document,window,navigator,console,Blob,URL,DOMException,AbortController,Event,crypto:webcrypto,devicePixelRatio:1,performance:{now:()=>1000},localStorage:storage,confirm:confirmAction,setTimeout:()=>++timerId,clearTimeout(){},setInterval:()=>++timerId,clearInterval(){},saved};
  if(imported.getTrainingContext)globals.getTrainingContext=(...args)=>{events.push('context');return imported.getTrainingContext(...args);};
  const context=vm.createContext(globals);
  vm.runInContext(source.replace(/^import[^\n]+\n/gm,'').replaceAll('import.meta.url',JSON.stringify(appUrl.href))+`\nconst originalExtractor=extractFrames;this.testAPI={
@@ -57,12 +61,13 @@ function fixture({storage={getItem:()=>null,setItem(){},removeItem(){}},confirmA
   ,preparer:fn=>{prepareAnalysisFrames=fn;}
   ,metadata:fn=>{getVideoMetadata=fn;},poster:fn=>{getPoster=fn;}
   ,training:()=>({session:trainingSession,persisted:trainingPersisted})
+  ,importProcessing:fn=>{getVideoMetadata=fn;getPoster=async()=>'';}
  };`,context);
  const api=context.testAPI;
  api.extractor(async()=>{events.push('extract');return preparedFrames;});
  api.provider(async payload=>{events.push('provider');requests.push(payload);return report({follow:payload.previousFocus?followUp:null});});
  api.save(async record=>{events.push('persist');saved.push(structuredClone(record));return true;});
- return {api,nodes,speeds,events,requests,saved,htmlWrites};
+ return {api,nodes,speeds,events,requests,saved,htmlWrites,downloads};
 }
 
 function settingsStorage(){const values=new Map();return {values,getItem:name=>values.get(name)??null,setItem:(name,value)=>values.set(name,value),removeItem:name=>values.delete(name)};}
@@ -103,9 +108,63 @@ test('a camera clip with a confirmed start still initializes its separate analys
  const video={duration:6,videoWidth:720,videoHeight:1280};let loaded=0,disposed=0,prepared=0;
  f.api.reader(async()=>({video,dispose:()=>disposed++}));
  f.api.localDetector(async()=>{loaded++;return {detectForVideo:()=>({detections:[{boundingBox:{originX:72,originY:128,width:144,height:256},categories:[{score:.9}]}]})};});
- f.api.preparer(async(v,options)=>{prepared++;assert.equal(loaded,1);assert.equal(v,video);const boxes=options.detectPersons(v);assert.equal(boxes[0].x,.1);assert.equal(boxes[0].w,.2);return preparedFrames;});
+ f.api.preparer(async(v,options)=>{prepared++;assert.equal(loaded,1);assert.equal(v,video);const boxes=await options.detectPersons(v);assert.equal(boxes[0].x,.1);assert.equal(boxes[0].w,.2);return preparedFrames;});
  const result=await f.api.realExtractor(current,new AbortController().signal);
  assert.equal(result,preparedFrames);assert.equal(loaded,1);assert.equal(prepared,1);assert.equal(disposed,1);assert.equal(f.requests.length,0);
+});
+
+test('applying an imported play range preserves its start in playback and analysis',async()=>{
+ const f=fixture(),current=clip('import',1000);current.source='import';
+ f.api.setup([current],current);await f.api.selectRecord(current);
+ f.nodes.trimStart.value='1';f.nodes.trimEnd.value='5';await f.nodes.applyTrimBtn.onclick();
+ const video={duration:6,videoWidth:720,videoHeight:1280};
+ f.api.reader(async()=>({video,dispose(){}}));
+ f.api.localDetector(async()=>({detectForVideo(){throw new Error('Confirmed ranges must not scout for a new start');}}));
+ f.api.preparer(async(_video,{start,end})=>{assert.equal(start,1);assert.equal(end,5);return preparedFrames;});
+ const prepared=await f.api.realExtractor(current,new AbortController().signal);
+ assert.equal(prepared,preparedFrames);assert.equal(f.saved.at(-1).contentStartConfirmed,true);
+ assert.equal(current.trimStart,1);assert.equal(current.trimEnd,5);
+});
+
+test('an imported jump keeps its own learning references in review, analysis and export',async()=>{
+ const older=clip('older',1000),f=fixture();f.api.setup([older],older);
+ const file=new Blob(['video'],{type:'video/mp4'});file.name='jump.mp4';
+ f.nodes.jumpActionInput.value='Indy 抓板';f.nodes.jumpActionInput.oninput();
+ f.nodes.jumpMasteryInput.value='能做但不稳定';f.nodes.jumpMasteryInput.onchange();
+ f.api.importProcessing(async()=>{throw new Error('Could not open file');});
+ await f.api.importVideo(file);
+ assert.equal(f.nodes.jumpActionInput.value,'Indy 抓板');assert.equal(f.nodes.jumpMasteryInput.value,'能做但不稳定');
+ f.api.importProcessing(async()=>({duration:6,width:720,height:1280}));
+ await f.api.importVideo(file);
+ const {current}=f.api.snapshot(),intent={action:'Indy 抓板',mastery:'能做但不稳定'};
+ assert.deepEqual(current.jumpIntent,intent);assert.deepEqual(f.saved.at(-1).jumpIntent,intent);
+ assert.equal(f.nodes.clipIntent.hidden,false);
+ assert.equal(f.nodes.clipPlannedAction.textContent,intent.action);assert.equal(f.nodes.clipMastery.textContent,intent.mastery);
+ assert.equal(f.nodes.jumpActionInput.value,'');assert.equal(f.nodes.jumpMasteryInput.value,'');
+ f.nodes.jumpActionInput.value='下一跳练的是直飞';f.nodes.jumpActionInput.oninput();
+ await f.api.analyzeCurrent();
+ assert.deepEqual(f.requests.at(-1).jumpIntent,intent);
+ assert.equal(current.actionType,'直飞');assert.equal(f.nodes.clipPlannedAction.textContent,'Indy 抓板');
+ f.nodes.exportReportBtn.onclick();
+ const {url}=f.downloads.at(-1);
+ try {
+  const exported=await fetch(url).then(response=>response.json());
+  assert.deepEqual(exported.jumpIntent,intent);
+  assert.equal(exported.action,'直飞');
+ } finally{URL.revokeObjectURL(url);}
+ await f.api.selectRecord(older);assert.equal(f.nodes.clipIntent.hidden,true);
+});
+
+test('analysis extraction uses tile fallback only when full-frame person detection is empty',async()=>{
+ const f=fixture(),current=clip('camera',1000);current.contentStartConfirmed=true;
+ const video={duration:6,videoWidth:720,videoHeight:1280};let full=0,tiles=0,disposed=0;
+ f.api.reader(async()=>({video,dispose:()=>disposed++}));
+ f.api.localDetector(async()=>({detectForVideo:image=>{
+  if(image===video){full++;return {detections:[]};}
+  tiles++;return {detections:[{boundingBox:{originX:72,originY:128,width:144,height:256},categories:[{categoryName:'person',score:.9}]}]};
+ }}));
+ f.api.preparer(async(v,options)=>{const boxes=await options.detectPersons(v);assert.equal(full,1);assert.equal(tiles,2);assert.ok(boxes.length>0);assert.ok(boxes.every(box=>box.x>=0&&box.y>=0&&box.x+box.w<=1&&box.y+box.h<=1));return preparedFrames;});
+ assert.equal(await f.api.realExtractor(current,new AbortController().signal),preparedFrames);assert.equal(disposed,1);assert.equal(f.requests.length,0);
 });
 
 test('cancelling while local analysis detection initializes disposes the video before preparation or API calls',async()=>{
@@ -251,25 +310,32 @@ test('schema 6 reports render derived recognition evidence as text and preserve 
  a.analysis.recognizedAction.evidenceIncomplete=false;f.api.setup([current],current);f.api.provider(async()=>a);await f.api.analyzeCurrent();
  assert.equal(f.nodes.clipTitle.textContent,'直飞');assert.equal(f.nodes.actionEvidencePanel.hidden,false);assert.ok(f.nodes.actionEvidenceList.textContent.includes('朝向稳定 '+marker));assert.ok(!f.htmlWrites.some(value=>value.includes(marker)));
  assert.ok(f.nodes.analysisResult.textContent.includes('腾空可见表现'));assert.ok(f.nodes.analysisResult.textContent.includes('总体分析'));
- const evidenceButton=f.nodes.actionEvidenceList.children[0].children.find(child=>child.className==='time-link');evidenceButton.onclick();assert.equal(f.nodes.reviewVideo.currentTime,.2);
+ let revealed=false;f.nodes.reviewVideo.scrollIntoView=()=>{revealed=true;};
+ const evidenceButton=f.nodes.actionEvidenceList.children[0].children.find(child=>child.className==='time-link');evidenceButton.onclick();assert.equal(f.nodes.reviewVideo.currentTime,.2);assert.equal(revealed,true);
  current.analysis=report({schemaVersion:5});await f.api.selectRecord(current);assert.equal(f.nodes.actionEvidencePanel.hidden,true);
 });
 
-test('removed attention UI and legacy notes cannot enter subsequent model requests',async()=>{
- const storage=settingsStorage(),seed=fixture({storage});seed.api.setup([],null);
- for(const [key,value] of storage.values)if(key.startsWith('airbag-settings-v1:')){
-  storage.values.set(key,JSON.stringify({...JSON.parse(value),attention:'LEGACY_SETTINGS_ATTENTION'}));
- }
- const current=clip('legacy-note',1000),f=fixture({storage});current.attention='LEGACY_RECORD_ATTENTION';
- f.api.setup([current],current);await f.api.selectRecord(current);await f.api.analyzeCurrent();
- assert.equal(f.nodes.jumpAttentionInput,undefined);
- assert.equal(html.includes('练习思路与学习资料'),false);
- assert.equal(f.nodes.settingsSaveHint.textContent.includes('特别关注'),false);
- assert.equal(Object.hasOwn(f.requests[0],'attention'),false);
- assert.equal(Object.hasOwn(current.analysis,'attention'),false);
- assert.equal(JSON.stringify(f.requests).includes('LEGACY_'),false);
- const reopened=fixture({storage});reopened.api.setup([current],current);await reopened.api.selectRecord(current);
- await reopened.api.analyzeCurrent();assert.equal(Object.hasOwn(reopened.requests[0],'attention'),false);
+test('attention persists across videos and reloads until explicitly changed or cleared',async()=>{
+ const storage=settingsStorage(),first=clip('first-attention',1000),second=clip('second-attention',2000),f=fixture({storage});first.attention='旧视频的观察主题';f.api.setup([second,first],second);await f.api.selectRecord(second);
+ assert.equal(f.nodes.attentionIndicator.hidden,true);
+ f.nodes.attentionDialog.showModal=()=>{f.nodes.attentionDialog.open=true;};
+ f.nodes.attentionBtn.onclick();assert.equal(f.nodes.attentionDialog.open,true);
+ f.nodes.jumpAttentionInput.value='  持续留意提前转肩  ';f.nodes.jumpAttentionInput.oninput();await f.nodes.jumpAttentionInput.onchange();
+ assert.equal(f.nodes.attentionIndicator.hidden,false);assert.equal(f.nodes.attentionBtn['aria-label'],'特别关注，已设置');
+ await f.api.analyzeCurrent();assert.equal(f.requests[0].attention,'持续留意提前转肩');assert.equal(second.analysis.attention,'持续留意提前转肩');
+ await f.api.selectRecord(first);assert.equal(f.nodes.jumpAttentionInput.value,'  持续留意提前转肩  ');await f.api.analyzeCurrent();assert.equal(f.requests[1].attention,'持续留意提前转肩');
+ f.nodes.jumpAttentionInput.value='改看抓板';f.nodes.jumpAttentionInput.oninput();assert.equal(second.analysis.attention,'持续留意提前转肩');
+ const reopened=fixture({storage});reopened.api.setup([second,first],second);await reopened.api.selectRecord(second);assert.equal(reopened.nodes.jumpAttentionInput.value,'改看抓板');
+ reopened.nodes.jumpAttentionInput.value='';reopened.nodes.jumpAttentionInput.oninput();const cleared=fixture({storage});cleared.api.setup([first],first);await cleared.api.selectRecord(first);assert.equal(cleared.nodes.jumpAttentionInput.value,'');
+ assert.equal(cleared.nodes.attentionIndicator.hidden,true);
+});
+
+test('attention is frozen while analysis is running and restored after extraction fails',async()=>{
+ const current=clip('attention-freeze',1000),f=fixture(),gate=deferred();current.attention='关注本跳舒展';f.api.setup([current],current);await f.api.selectRecord(current);f.nodes.jumpAttentionInput.value='关注本跳舒展';f.nodes.jumpAttentionInput.oninput();f.api.extractor(()=>gate.promise);
+ const pending=f.api.analyzeCurrent();await settleUntil(()=>f.api.snapshot().analysisBusy);assert.equal(f.nodes.jumpAttentionInput.disabled,true);assert.equal(f.nodes.attentionBtn.disabled,true);
+ f.nodes.jumpAttentionInput.value='分析期间改动';f.nodes.jumpAttentionInput.oninput();assert.equal(current.attention,'关注本跳舒展');gate.resolve(preparedFrames);await pending;
+ assert.equal(f.requests[0].attention,'关注本跳舒展');assert.equal(current.analysis.attention,'关注本跳舒展');assert.equal(f.nodes.jumpAttentionInput.disabled,false);assert.equal(f.nodes.attentionBtn.disabled,false);
+ f.api.extractor(async()=>{throw Error('提取失败');});await f.api.analyzeCurrent();assert.equal(f.nodes.jumpAttentionInput.disabled,false);assert.equal(current.analysis.attention,'关注本跳舒展');
 });
 
 test('comparison preference restores independently of model credentials and opens without a page toggle',async()=>{
@@ -357,4 +423,24 @@ for(const outcome of ['success','failed','cancelled'])test(`practice feeling con
  const section=f.nodes.analysisResult.children.find(child=>child.className==='practice-feeling'),buttons=section.children.find(child=>child.className==='feeling-options');
  assert.ok(buttons.children.every(button=>button.disabled===false),'settled results must release their native disabled controls');
  await buttons.children[2].onclick();assert.equal(current.practiceFeeling,'harder');assert.equal(f.requests.length,1,'saving a feeling must not make a new model request');
+});
+
+test('review downloads the original video when native file sharing is unavailable',async()=>{
+ const f=fixture(),item=clip('download',1);f.api.setup([item],item);await f.api.selectRecord(item);
+ assert.equal(f.nodes.shareVideoBtn.disabled,false);assert.equal(f.nodes.shareVideoBtn.textContent,'下载原片');
+ await f.nodes.shareVideoBtn.onclick();
+ assert.equal(f.downloads.length,1);const [{name,url}]=f.downloads;
+ try{
+  assert.match(name,/\.mp4$/);
+  const downloaded=await fetch(url).then(response=>response.blob());
+  assert.equal(downloaded.type,item.blob.type);assert.equal(await downloaded.text(),await item.blob.text());
+ }finally{URL.revokeObjectURL(url);}
+});
+
+test('review opens the system save menu when the original video can be shared',async()=>{
+ const shared=[],f=fixture({navigator:{canShare:({files})=>files[0].type==='video/mp4',share:async payload=>shared.push(payload)}});
+ const item=clip('share',1);f.api.setup([item],item);await f.api.selectRecord(item);
+ assert.equal(f.nodes.shareVideoBtn.disabled,false);assert.equal(f.nodes.shareVideoBtn.textContent,'保存到相册');
+ await f.nodes.shareVideoBtn.onclick();assert.equal(f.downloads.length,0);assert.equal(shared.length,1);
+ assert.equal(await shared[0].files[0].text(),await item.blob.text());
 });

@@ -46,7 +46,7 @@ export class ComparisonPlayer {
   if(this.active||!this.previous||!this.segments?.length)return;
   const ui=this.ui;
   try{this.url=this.createObjectURL(this.previous.blob);}catch{ui.compareHint.textContent='未能打开上一跳视频，请重新选择本跳后重试。';return;}
-  this.active=true;ui.reviewVideo.pause();ui.comparePreviousVideo.src=this.url;this.setPlaybackRate(ui.reviewVideo.playbackRate||1);
+  this.active=true;ui.reviewVideo.pause();ui.reviewVideo.removeAttribute('poster');ui.comparePreviousVideo.src=this.url;this.setPlaybackRate(ui.reviewVideo.playbackRate||1);
   ui.compareControls.hidden=false;ui.comparePrevious.hidden=false;ui.compareCurrentLabel.hidden=false;
   ui.comparisonPlayers.classList.toggle('comparing',true);if(ui.compareToggleBtn){ui.compareToggleBtn.textContent='收起对比';ui.compareToggleBtn.setAttribute('aria-expanded','true');}
   if(ui.loopBtn)ui.loopBtn.disabled=true;

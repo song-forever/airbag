@@ -21,7 +21,7 @@ test('reanalysis of the first jump preserves the established group task without 
  {fetchImpl:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({stages,
   nextJump:{instruction:'换一个新的任务。',check:'new-check',reason:'不应被采用的新重点。',time:null},
   followUp:{status:'done',observation:'模型试图把本跳当作上一跳。',time:null},coaching:{positive:null},
-  recognizedAction:{rotation:{state:'uncertain',evidence:[]},grab:{state:'uncertain',evidence:[]},otherAction:null}})}}]}))});
+  orientationTrace:[[0,'air','unknown'],[1,'air','unknown'],[2,'air','unknown'],[3,'air','unknown']],recognizedAction:{rotation:{state:'uncertain',evidence:[]},grab:{state:'uncertain',evidence:[]},otherAction:null}})}}]}))});
  assert.equal(result.analysis.nextJump.check,original.check);
  assert.equal(result.analysis.nextJump.instruction,original.instruction);
  assert.equal(result.analysis.followUp,null);

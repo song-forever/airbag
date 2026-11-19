@@ -9,7 +9,9 @@ const input = (overrides = {}) => ({ apiKey: KEY, model: 'qwen3-vl-plus', action
   frames: [0, 1.5, 3.7, 4.2].map((time) => ({ time, dataUrl: JPEG })), ...overrides });
 const nextJump = { instruction: '延续本跳稳定的肩线。', reason: '腾空时肩线保持稳定，值得继续保持。', check: '回看时肩线是否同样平稳。', time: 3.7 };
 const stages = ['助滑','上台','起跳','腾空'].map(phase => ({ phase, analysis: phase+'阶段动作表现。', time: null }));
-const content = (overrides = {}) => JSON.stringify({ stages, nextJump, ...overrides });
+const orientationTrace = (frames = input().frames) => frames.map((_frame, index) => [index, 'air', 'back']);
+const content = (overrides = {}) => JSON.stringify({ ...(Object.hasOwn(overrides, 'recognizedAction') ? { orientationTrace: orientationTrace() } : {}), stages, nextJump, ...overrides });
+const recognitionContent = (recognizedAction, frames = input().frames) => JSON.stringify({ orientationTrace: orientationTrace(frames), recognizedAction });
 const upstream = (text = content(), usage = { prompt_tokens: 16000, completion_tokens: 700, total_tokens: 16700 }) =>
   new Response(JSON.stringify({ choices: [{ message: { content: text } }], usage }));
 const rejectsCode = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code); assert.ok(!error.message.includes(KEY)); return true; });
@@ -266,7 +268,7 @@ test('unfinished and uncertain follow-ups keep the request cue without trusting 
 });
 
 const recognized = (type = '直飞', overrides = {}) => {
- const evidence=observation=>[1.5,3.7].map(time=>({time,observation}));
+ const evidence=observation=>[1.5,3.7,4.2].map(time=>({time,observation}));
  const rotation=type==='无法判断'||type==='其他'?'uncertain':['转体','转体抓板'].includes(type)?'yes':'no';
  const grab=type==='无法判断'||type==='其他'?'uncertain':['抓板','转体抓板'].includes(type)?'yes':'no';
  return {rotation:{state:rotation,evidence:rotation==='uncertain'?[]:evidence(rotation==='yes'?'身体与雪板整体朝向发生变化。':'身体与雪板整体朝向保持稳定。')},grab:{state:grab,evidence:grab==='uncertain'?[]:evidence(grab==='yes'?'手与板建立抓握接触。':'手与雪板分离。')},otherAction:type==='其他'?{evidence:evidence('可见四个标准类别以外的其他动作。')}:null,...overrides};
@@ -276,18 +278,23 @@ const trainingSession={id:'group-one',goal:'grab',detail:'练习已经会的抓�
 const coachingPlan=(overrides={})=>({session:{...trainingSession},method:{id:'repeat'},progress:{reviewed:0,done:0,partial:0,notYet:0,uncertain:0,consecutiveDone:0,consecutiveNeedsWork:0},previousFeeling:null,...overrides});
 const coaching={positive:{observation:'腾空时肩线保持平稳。',time:3.7}};
 
-test('session coaching adds bounded intent, method and PTT to one request without sending history or keys',async()=>{
+test('session coaching adds bounded intent, method and PTT only to the coaching request without sending history or keys',async()=>{
  const plan=coachingPlan();plan.session.apiKey='SESSION_KEY_SENTINEL';plan.frames=['OLD_FRAME_SENTINEL'];plan.method.description='METHOD_OVERRIDE_SENTINEL';
  let calls=0;
  const result=await analyzeFrames(automaticInput({coachingPlan:plan}),{fetchImpl:async(_url,options)=>{
   calls++;const body=JSON.parse(options.body),all=JSON.stringify(body),system=body.messages[0].content;
+  if(calls===1){
+   assert.match(system,/动作特征观察器/);
+   assert.doesNotMatch(all,/练习已经会的抓板|本组训练计划|PTT/);
+   return upstream(recognitionContent(recognized('直飞')));
+  }
   assert.match(system,/PTT/);assert.match(system,/训练意图/);assert.match(system,/本跳做到不等于稳定掌握/);
   assert.match(body.messages[1].content[0].text,/本组训练计划/);
   assert.match(body.messages[1].content[0].text,/练习已经会的抓板/);
   for(const secret of ['SESSION_KEY_SENTINEL','OLD_FRAME_SENTINEL','METHOD_OVERRIDE_SENTINEL'])assert.equal(all.includes(secret),false);
   return upstream(content({recognizedAction:recognized('直飞'),coaching}));
  }});
- assert.equal(calls,1);assert.equal(result.analysis.schemaVersion,7);
+ assert.equal(calls,2);assert.equal(result.analysis.schemaVersion,7);
  assert.equal(result.analysis.coaching.session.goal,'grab');assert.equal(result.analysis.recognizedAction.type,'直飞');
  assert.deepEqual(result.analysis.coaching.positive,coaching.positive);
  assert.equal(result.analysis.coaching.method.id,'repeat');
@@ -325,23 +332,107 @@ test('invalid session context is rejected before network and provider cannot rep
  const bounded=await analyzeFrames(automaticInput({coachingPlan:coachingPlan()}),{fetchImpl:async()=>upstream(content({recognizedAction:recognized('抓板'),coaching:{positive:{observation:'x'.repeat(401),time:null}}}))});
  assert.equal(bounded.analysis.coaching.positive.observation.length,400);
 });
-test('automatic action recognition uses the existing current-frame request with no requested goal, including Omni', async () => {
+test('automatic recognition is isolated before coaching with the same frames, including Omni', async () => {
   for (const model of ['qwen3-vl-plus', 'qwen3-omni-flash']) {
-    let requests = 0;
-    const result = await analyzeFrames(automaticInput({ model, action: 'UNTRUSTED_MANUAL_GOAL' }), { fetchImpl: async (_url, options) => {
-      requests++;
+    const requests = [];
+    const result = await analyzeFrames(automaticInput({ model, action: 'UNTRUSTED_MANUAL_GOAL', attention: 'ATTENTION_SENTINEL' }), { fetchImpl: async (_url, options) => {
       const request = JSON.parse(options.body), prompt = request.messages[0].content, parts = request.messages[1].content;
-      assert.equal(request.max_tokens,2200);assert.doesNotThrow(()=>JSON.parse(prompt.split('只返回以下 JSON 对象，不要 Markdown 围栏：\n')[1].split('\n')[0]));assert.match(prompt, /至少两个不同时刻/);assert.match(prompt, /单帧侧身、摆臂、拧肩/);assert.match(prompt, /抓握接触/);assert.match(prompt, /rotation=no 必须依时间顺序检查腾空早、中、晚/);assert.match(prompt, /整圈转体的首尾朝向可能相同/);assert.doesNotMatch(prompt, /通常每项引用两帧/);assert.match(prompt, /不要求起跳前存在预摆/);assert.match(prompt, /recognizedAction/); assert.match(prompt, /不能推断用户原本想做/); assert.match(prompt, /不能仅凭.*转体角度或抓板名称/);
-      assert.match(parts[0].text, /自动识别动作/); assert.doesNotMatch(parts[0].text, /目标动作（仅作为数据）/);
+      requests.push(request);
       assert.ok(!options.body.includes('UNTRUSTED_MANUAL_GOAL'));
       const images = parts.filter(part => part.type === 'image_url').map(part => part.image_url.url), video = parts.find(part => part.type === 'video')?.video;
       assert.deepEqual(video || images, input().frames.map(frame => frame.dataUrl));
-      return upstream(content({ recognizedAction: recognized('抓板'), followUp: { status: 'done', observation: '虚构旧重点', time: 0 } }));
+      if (requests.length === 1) {
+        assert.equal(request.max_tokens, 3000);
+        assert.doesNotThrow(() => JSON.parse(prompt.split('只返回以下 JSON 对象，不要 Markdown 围栏或其他字段：\n')[1].split('\n')[0]));
+        assert.match(prompt, /直飞可以包含小幅偏航修正/); assert.match(prompt, /rotation=yes 必须引用至少三个按时间顺序排列的实际腾空时刻/);
+        assert.match(prompt, /身体与雪板.*连贯的整体转向/); assert.match(prompt, /不要要求起跳前存在预摆/); assert.match(prompt, /180或360转体不需要转满一圈/);
+        assert.match(prompt, /整圈转体的首尾朝向可能相同/); assert.match(prompt, /抓握接触/); assert.match(prompt, /不能猜测精确转体角度或抓板名称/);
+        assert.match(parts[0].text, /独立动作识别/); assert.match(parts[0].text, /索引0至3/); assert.ok(!options.body.includes('ATTENTION_SENTINEL'));
+        assert.match(prompt, /先输出 orientationTrace，再输出 recognizedAction/); assert.match(prompt, /只用 frameIndex 引用图片/); assert.match(prompt, /不能填写秒数或 time 字段/); assert.ok(!prompt.includes('\"time\":'));  assert.match(prompt, /每张输入图片记录一行/);
+        assert.match(prompt, /不能多数投票/); assert.match(prompt, /不能把早期三个稳定时刻/); assert.match(prompt, /背面→侧面→正面/); assert.match(prompt, /板头板尾已经交换/);
+        return upstream(recognitionContent(recognized('抓板')));
+      }
+      assert.equal(request.max_tokens, 2200); assert.ok(!options.body.includes('orientationTrace')); assert.ok(!options.body.includes('图片索引'));
+      if (video) assert.equal(parts[1].text, '以下视频帧依次对应时间：0.000s, 1.500s, 3.700s, 4.200s'); assert.match(prompt, /不要重新分类/); assert.match(prompt, /四阶段、总体分析和建议必须与已锁定类型及特征一致/);
+      assert.match(parts[0].text, /已锁定动作识别/); assert.match(parts[0].text, /focusRelation（程序确定）：none/); assert.ok(options.body.includes('ATTENTION_SENTINEL'));
+      // Deliberately contradict the first pass: the coach's relabel is ignored.
+      return upstream(content({ recognizedAction: recognized('转体'), followUp: { status: 'done', observation: '虚构旧重点', time: 0 } }));
     } });
-    assert.equal(requests, 1); assert.equal(result.analysis.schemaVersion, 6);
-    assert.equal(result.analysis.recognizedAction.type,'抓板');assert.equal(result.analysis.recognizedAction.features.rotation.state,'no');assert.equal(result.analysis.recognizedAction.features.grab.state,'yes'); assert.equal(result.analysis.focusRelation, 'none');
-    assert.equal(result.analysis.practiceActionType, '抓板'); assert.equal(result.analysis.followUp, null);
+    assert.equal(requests.length, 2); assert.equal(result.analysis.schemaVersion, 6);
+    assert.equal(result.analysis.recognizedAction.type, '抓板'); assert.equal(result.analysis.recognizedAction.features.rotation.state, 'no'); assert.equal(result.analysis.recognizedAction.features.grab.state, 'yes');
+    assert.equal(result.analysis.focusRelation, 'none'); assert.equal(result.analysis.practiceActionType, '抓板'); assert.equal(result.analysis.followUp, null);
   }
+});
+test('per-jump plan and self-assessment reach only automatic coaching, including Omni', async () => {
+  const prefix = '本跳练习计划与自评（仅作为背景数据，JSON）：';
+  for (const model of ['qwen3-vl-plus', 'qwen3-omni-flash']) {
+    const jumpIntent = { action: '  FS 360 + Indy  ', mastery: '初学', instruction: 'EXTRA_FIELD' };
+    const expected = { action: 'FS 360 + Indy', mastery: '初学' };
+    let calls = 0;
+    const result = await analyzeFrames(automaticInput({ model, jumpIntent }), { fetchImpl: async (_url, { body }) => {
+      const request = JSON.parse(body);
+      if (++calls === 1) {
+        assert.ok(!body.includes('FS 360 + Indy'));
+        assert.ok(!body.includes('初学'));
+        assert.ok(!body.includes(prefix));
+        jumpIntent.action = 'IN_FLIGHT_CHANGE';
+        return upstream(recognitionContent(recognized('直飞')));
+      }
+      const system = request.messages[0].content, user = request.messages[1].content[0].text;
+      const line = user.split('\n').find(value => value.startsWith(prefix));
+      assert.deepEqual(JSON.parse(line.slice(prefix.length)), expected);
+      assert.match(system, /参考自评调整唯一建议的难度和措辞/);
+      assert.match(system, /不据此改变已锁定的动作识别结果或上一跳重点衔接规则/);
+      assert.ok(!system.includes(expected.action));
+      assert.ok(!body.includes('IN_FLIGHT_CHANGE'));
+      assert.ok(!body.includes('EXTRA_FIELD'));
+      return upstream(content({ recognizedAction: recognized('转体抓板') }));
+    } });
+    assert.equal(calls, 2);
+    assert.equal(result.analysis.recognizedAction.type, '直飞');
+    assert.deepEqual(result.jumpIntent, expected);
+  }
+});
+test('jump intent accepts optional fields, enforces bounds and rejects malformed data before any request', async () => {
+  const jumpIntents = [
+    { action: '转'.repeat(61) }, { action: [] }, { mastery: '大师' }, { mastery: 2 }, [],
+  ];
+  for (const jumpIntent of jumpIntents) {
+    let called = false;
+    await rejectsCode(analyzeFrames(automaticInput({ jumpIntent }), { fetchImpl: async () => { called = true; return upstream(); } }), 'invalid_jump_intent');
+    assert.equal(called, false);
+  }
+  for (const [jumpIntent, expected] of [
+    [null, undefined],
+    [{ action: '转'.repeat(60) }, { action: '转'.repeat(60), mastery: '' }],
+    [{ mastery: '能做但不稳定' }, { action: '', mastery: '能做但不稳定' }],
+  ]) {
+    let calls = 0;
+    const result = await analyzeFrames(automaticInput({ jumpIntent }), { fetchImpl: async () => upstream(++calls === 1 ? recognitionContent(recognized()) : content()) });
+    assert.equal(calls, 2);
+    assert.deepEqual(result.jumpIntent, expected);
+  }
+});
+test('both automatic requests keep the same adaptive crops and nonuniform timestamps', async () => {
+  let calls = 0;
+  await analyzeFrames({ ...adaptiveInput(), actionMode: 'auto', model: 'qwen3.7-plus' }, { fetchImpl: async (_url, options) => {
+    calls++;
+    const body = JSON.parse(options.body), parts = body.messages[1].content;
+    assert.equal(parts.filter(part => part.type === 'image_url').length, 4); assert.ok(!parts.some(part => part.type === 'video'));
+    assert.match(body.messages[0].content, /裁剪造成/); assert.match(parts[3].text, /1\.500.*x=100/); assert.match(parts[5].text, /3\.700/);
+    return upstream(calls === 1 ? recognitionContent(recognized('直飞')) : content());
+  } });
+  assert.equal(calls, 2);
+});
+test('coaching may omit recognition entirely and cannot change the locked action or focus relation', async () => {
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: '直飞' } }), { fetchImpl: async (_url, options) => {
+    calls++;
+    if (calls === 1) return upstream(recognitionContent(recognized('转体')));
+    assert.match(JSON.parse(options.body).messages[1].content[0].text, /focusRelation（程序确定）：different/);
+    return upstream(content({ focusRelation: 'same', followUp: { status: 'not_yet', observation: '不应采纳', time: 1.5 } }));
+  } });
+  assert.equal(calls, 2); assert.equal(result.analysis.recognizedAction.type, '转体'); assert.equal(result.analysis.focusRelation, 'different'); assert.equal(result.analysis.followUp, null);
 });
 test('automatic mode accepts no action but legacy manual mode still validates and returns schema 4', async () => {
   const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => upstream(content({ recognizedAction: recognized() })) });
@@ -384,20 +475,27 @@ test('training continuity follows the derived action instead of a contradictory 
  assert.equal(result.analysis.recognizedAction.type,'直飞');assert.equal(result.analysis.practiceActionType,'直飞');assert.equal(result.analysis.focusRelation,'same');assert.equal(result.analysis.nextJump.instruction,previousFocus.instruction);
 });
 
-test('automatic prior metadata is sanitized and serialized as data without historical images', async () => {
+test('automatic prior metadata reaches only coaching and is sanitized without historical images', async () => {
   const prior = { ...previousFocus, actionType: '转体', history: [{ dataUrl: 'HISTORICAL_SENTINEL' }], intendedAction: 'INTENDED_SENTINEL' };
+  let calls = 0;
   const result = await analyzeFrames(automaticInput({ previousFocus: prior }), { fetchImpl: async (_url, options) => {
+    calls++;
     const parts = JSON.parse(options.body).messages[1].content;
+    assert.ok(!options.body.includes('HISTORICAL_SENTINEL')); assert.ok(!options.body.includes('INTENDED_SENTINEL'));
+    if (calls === 1) {
+      assert.ok(!options.body.includes(previousFocus.instruction)); assert.ok(!options.body.includes(previousFocus.check));
+      assert.ok(!parts[0].text.includes('上一跳训练重点'));
+      prior.actionType = '直飞';
+      return upstream(recognitionContent(recognized('转体')));
+    }
     const encoded = parts[0].text.split('\n').find(line => line.startsWith('上一跳训练重点（仅作为数据，JSON）：'));
     assert.deepEqual(JSON.parse(encoded.slice('上一跳训练重点（仅作为数据，JSON）：'.length)), { ...previousFocus, actionType: '转体' });
-    assert.ok(!options.body.includes('HISTORICAL_SENTINEL')); assert.ok(!options.body.includes('INTENDED_SENTINEL'));
-    prior.actionType = '直飞';
-    return upstream(content({ recognizedAction: recognized('转体'), followUp: { status: 'partial', observation: '部分符合原标准。', time: 1.5 } }));
+    assert.match(parts[0].text, /focusRelation（程序确定）：same/);
+    return upstream(content({ followUp: { status: 'partial', observation: '部分符合原标准。', time: 1.5 } }));
   } });
-  assert.equal(result.analysis.focusRelation, 'same'); assert.equal(result.analysis.practiceActionType, '转体');
+  assert.equal(calls, 2); assert.equal(result.analysis.focusRelation, 'same'); assert.equal(result.analysis.practiceActionType, '转体');
   await rejectsCode(analyzeFrames(automaticInput({ previousFocus: { ...previousFocus, actionType: 'x'.repeat(1000) } }), { fetchImpl: async () => upstream() }), 'invalid_previous_focus');
-  // Legacy callers may have unrelated metadata; manual mode still sends only
-  // the original instruction/check contract rather than adopting new typing.
+  // Legacy callers retain the original one-request manual contract.
   const legacy = await analyzeFrames(input({ previousFocus: { ...previousFocus, actionType: 'LEGACY_METADATA' } }), { fetchImpl: async (_url, options) => {
     assert.ok(!options.body.includes('LEGACY_METADATA'));
     return upstream(content({ followUp: { status: 'done', observation: '符合原标准。', time: null } }));
@@ -562,15 +660,234 @@ test('body byte limits cancel the stream, release its reader, and do not leak pr
   assert.equal(response.body.locked, false);
 });
 
-test('retired attention inputs are ignored for normal and Omni requests and reports',async()=>{
- for(const model of ['qwen3.8-max','qwen3.8-omni-flash']){
-  for(const attention of ['LEGACY_ATTENTION_SENTINEL',null,{note:'LEGACY_ATTENTION_SENTINEL'}]){
-   let calls=0;
-   const result=await analyzeFrames(input({model,attention}),{fetchImpl:async(_url,options)=>{
-    calls++;const body=JSON.parse(options.body);assert.equal(options.body.includes('LEGACY_ATTENTION_SENTINEL'),false);
-    assert.equal(JSON.stringify(body.messages).includes('特别关注'),false);return upstream();
-   }});
-   assert.equal(calls,1);assert.equal(Object.hasOwn(result,'attention'),false);
+test('invalid attention is rejected before sending either automatic request', async () => {
+  for (const attention of [{note:'invalid'}, '关'.repeat(241)]) {
+    let called = false;
+    await rejectsCode(analyzeFrames(automaticInput({attention}), {
+      fetchImpl: async () => { called = true; return upstream(); },
+    }), 'invalid_attention');
+    assert.equal(called, false);
   }
- }
+});
+
+test('automatic analysis sums usage and computes price tiers per request', async () => {
+  let calls = 0;
+  const usages = [{ prompt_tokens: 30_000, completion_tokens: 100, total_tokens: 30_100 }, { prompt_tokens: 30_000, completion_tokens: 200, total_tokens: 30_200 }];
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => {
+    const index = calls++;
+    return upstream(index ? content() : recognitionContent(recognized()), usages[index]);
+  } });
+  assert.equal(calls, 2); assert.deepEqual(result.usage, { prompt_tokens: 60_000, completion_tokens: 300, total_tokens: 60_300 });
+  assert.equal(result.estimatedCostCny, .063); assert.notEqual(result.estimatedCostCny, estimateCostCny(result.usage, result.model));
+});
+test('missing usage in either automatic step stays unknown rather than understating totals or cost', async () => {
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => {
+    const index = calls++;
+    return upstream(index ? content() : recognitionContent(recognized()), index ? { completion_tokens: 20 } : { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 });
+  } });
+  assert.deepEqual(result.usage, { prompt_tokens: null, completion_tokens: 30, total_tokens: null }); assert.equal(result.estimatedCostCny, null);
+});
+test('invalid recognition never sends coaching and second-step failures never publish partial reports', async () => {
+  for (const answer of ['', '{}', 'not JSON', JSON.stringify({ recognizedAction: [] })]) {
+    let calls = 0;
+    await assert.rejects(analyzeFrames(automaticInput(), { fetchImpl: async () => { calls++; return upstream(answer); } }), error => ['invalid_analysis', 'empty_analysis'].includes(error.code));
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  await rejectsCode(analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(recognitionContent(recognized())) : new Response('hidden details', { status: 429 }) }), 'provider_rate_limited');
+  assert.equal(calls, 2);
+});
+test('cancelling automatic recognition prevents coaching, and cancelling coaching uses the same abort signal', async () => {
+  const controller = new AbortController(); let calls = 0;
+  await rejectsCode(analyzeFrames(automaticInput(), { signal: controller.signal, fetchImpl: async () => {
+    calls++; controller.abort(); return upstream(recognitionContent(recognized()));
+  } }), 'analysis_cancelled'); assert.equal(calls, 1);
+  const secondController = new AbortController(); let firstSignal, secondSignal;
+  const running = analyzeFrames(automaticInput(), { signal: secondController.signal, fetchImpl: async (url, options) => {
+    if (!firstSignal) { firstSignal = options.signal; return upstream(recognitionContent(recognized())); }
+    secondSignal = options.signal; secondController.abort(); return pendingFetch(url, options);
+  } });
+  await rejectsCode(running, 'analysis_cancelled'); assert.equal(firstSignal, secondSignal); assert.equal(secondSignal.aborted, true);
+});
+test('both automatic steps share one 90 second deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0;
+  await rejectsCode(analyzeFrames(automaticInput(), { fetchImpl: async (_url, options) => {
+    calls++;
+    if (calls === 1) { t.mock.timers.tick(60_000); return upstream(recognitionContent(recognized())); }
+    const pending = pendingFetch(_url, options); t.mock.timers.tick(30_000); return pending;
+  } }), 'analysis_timeout');
+  assert.equal(calls, 2);
+});
+
+
+test('recognition requires a complete bounded orientation trace before any paid coaching request', async () => {
+  const valid = orientationTrace();
+  const malformed = [undefined, null, {}, [], valid.slice(0, 3), [...valid, [4, 'air', 'front']],
+    [[0, 'surface', 'back'], [2, 'air', 'back'], [1, 'air', 'side'], [3, 'air', 'front']],
+    valid.map((row, i) => i === 1 ? [0, ...row.slice(1)] : row),
+    valid.map((row, i) => i === 1 ? ['1', ...row.slice(1)] : row),
+    valid.map((row, i) => i === 1 ? [1, 'flight', 'back'] : row),
+    valid.map((row, i) => i === 1 ? [1, 'air', 'left'] : row),
+    valid.map((row, i) => i === 1 ? [1, 'air'] : row),
+    valid.map((row, i) => i === 1 ? [1, 'air', 'back', 'extra'] : row),
+    valid.map((row, i) => i === 1 ? null : row),
+  ];
+  for (const trace of malformed) {
+    let calls = 0;
+    await rejectsCode(analyzeFrames(automaticInput(), { fetchImpl: async () => {
+      calls++; return upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: recognized() }));
+    } }), 'invalid_analysis');
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  const reordered = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(JSON.stringify({ recognizedAction: recognized(), orientationTrace: valid })) : upstream(content()) });
+  assert.equal(calls, 2); assert.equal(reordered.analysis.recognizedAction.type, '直飞');
+});
+test('96-frame complete trace fits the recognition output budget and stays out of coaching and schema 6', async () => {
+  const frames = Array.from({ length: 96 }, (_, index) => ({ time: Number((index * .05).toFixed(3)), dataUrl: JPEG }));
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput({ frames }), { fetchImpl: async (_url, options) => {
+    calls++;
+    const body = JSON.parse(options.body), parts = body.messages[1].content;
+    assert.equal(parts.filter(part => part.type === 'image_url').length, 96);
+    if (calls === 1) {
+      assert.equal(body.max_tokens, 3000); assert.match(parts[0].text, /索引0至95/); assert.match(parts.at(-2).text, /图片索引 95；片段时间 4\.750/);
+      return upstream(recognitionContent(recognized(), frames));
+    }
+    assert.equal(body.max_tokens, 2200); assert.ok(!options.body.includes('orientationTrace'));
+    return upstream(content());
+  } });
+  assert.equal(calls, 2); assert.equal(result.analysis.schemaVersion, 6); assert.equal(result.analysis.recognizedAction.type, '直飞');
+  assert.ok(!JSON.stringify(result).includes('orientationTrace'));
+});
+test('facing changes are not hardcoded votes that override airborne model evidence', async () => {
+  const trace = [[0, 'air', 'back'], [1, 'air', 'back'], [2, 'air', 'side'], [3, 'air', 'front']];
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: recognized('直飞') })) : upstream(content()) });
+  assert.equal(calls, 2); assert.equal(result.analysis.recognizedAction.type, '直飞');
+});
+
+
+test('recognition frame indices map to real seconds before deriving categories and coaching', async () => {
+  const frames = Array.from({ length: 50 }, (_, index) => ({ time: Number((index * .1).toFixed(3)), dataUrl: JPEG }));
+  const evidence = [15, 25, 35].map(frameIndex => ({ frameIndex, time: 99, observation: '身体与雪板整体朝向可见。' }));
+  const raw = { rotation: { state: 'yes', evidence }, grab: { state: 'no', evidence }, otherAction: null };
+  const original = structuredClone(raw);
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput({ frames }), { fetchImpl: async (_url, options) => {
+    calls++;
+    if (calls === 1) return upstream(recognitionContent(raw, frames));
+    const request = JSON.parse(options.body), parts = request.messages[1].content;
+    assert.ok(!options.body.includes('frameIndex')); assert.ok(!parts.some(part => part.text?.includes('图片索引')));
+    const encoded = parts[0].text.split('\n')[0].split('：').slice(1).join('：');
+    assert.deepEqual(JSON.parse(encoded).features.rotation.evidence.map(item => item.time), [1.5, 2.5, 3.5]);
+    return upstream(content());
+  } });
+  assert.equal(calls, 2); assert.equal(result.analysis.recognizedAction.type, '转体');
+  assert.deepEqual(result.analysis.recognizedAction.features.rotation.evidence.map(item => item.time), [1.5, 2.5, 3.5]);
+  assert.equal(result.analysis.recognizedAction.time, 3.5); assert.deepEqual(raw, original);
+  assert.ok(!JSON.stringify(result).includes('frameIndex'));
+});
+test('other-action frame indices also map to supplied timestamps', async () => {
+  let calls = 0;
+  const raw = recognized('其他', { otherAction: { evidence: [1, 3].map(frameIndex => ({ frameIndex, observation: '可见独立的其他动作。' })) } });
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(recognitionContent(raw)) : upstream(content()) });
+  assert.equal(result.analysis.recognizedAction.type, '其他');
+  assert.deepEqual(result.analysis.recognizedAction.otherAction.evidence.map(item => item.time), [1.5, 4.2]);
+});
+test('invalid explicit frame indices cannot fall back to valid legacy times or promote a feature', async () => {
+  for (const frameIndex of [-1, 4, 1.5, '1', null, true]) {
+    let calls = 0;
+    const raw = recognized('转体', { rotation: { state: 'yes', evidence: [
+      { frameIndex: 1, observation: '身体与雪板朝向可见。' },
+      { frameIndex, time: 3.7, observation: '即使 time 有效也不能拯救无效索引。' },
+      { frameIndex: 3, observation: '身体与雪板朝向可见。' },
+    ] } });
+    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+      ? upstream(recognitionContent(raw)) : upstream(content()) });
+    assert.equal(calls, 2); assert.equal(result.analysis.recognizedAction.type, '无法判断');
+    assert.equal(result.analysis.recognizedAction.features.rotation.state, 'uncertain');
+    assert.deepEqual(result.analysis.recognizedAction.features.rotation.evidence, []);
+    assert.equal(result.analysis.recognizedAction.evidenceIncomplete, true);
+  }
+  for (const indices of [[1, 1, 3], [2, 1, 3]]) {
+    let calls = 0;
+    const raw = recognized('转体', { rotation: { state: 'yes', evidence: indices.map(frameIndex => ({ frameIndex, observation: '整体朝向可见。' })) } });
+    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+      ? upstream(recognitionContent(raw)) : upstream(content()) });
+    assert.equal(result.analysis.recognizedAction.features.rotation.state, 'uncertain');
+  }
+});
+
+test('surface-only trace cannot ground a confident negative action, even with three valid indices', async () => {
+  const frames = Array.from({ length: 36 }, (_, index) => ({ time: Number((index * .1).toFixed(3)), dataUrl: JPEG }));
+  const evidence = [14, 24, 34].map(frameIndex => ({ frameIndex, observation: '模型声称雪板朝向未变、双手远离板体。' }));
+  const raw = { rotation: { state: 'no', evidence }, grab: { state: 'no', evidence }, otherAction: null };
+  const trace = frames.map((_, index) => [index, 'surface', 'back']);
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput({ frames }), { fetchImpl: async (_url, options) => {
+    if (++calls === 1) return upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: raw }));
+    const request = JSON.parse(options.body), locked = JSON.parse(request.messages[1].content[0].text.split('\n')[0].split('：').slice(1).join('：'));
+    assert.equal(locked.type, '无法判断'); assert.equal(locked.features.rotation.state, 'uncertain');
+    assert.equal(locked.features.grab.state, 'uncertain'); assert.equal(locked.evidenceIncomplete, true);
+    return upstream(content());
+  } });
+  assert.equal(calls, 2); assert.equal(result.analysis.recognizedAction.type, '无法判断');
+  assert.deepEqual(result.analysis.recognizedAction.features.rotation.evidence.map(item => item.time), [1.4, 2.4, 3.4]);
+  assert.equal(result.analysis.recognizedAction.evidenceIncomplete, true);
+  assert.equal(result.analysis.nextJump.instruction, '下一跳先沿用熟悉的动作节奏。');
+});
+
+test('one non-air quoted frame downgrades only that determined feature without guessing a replacement', async () => {
+  for (const name of ['rotation', 'grab']) for (const state of ['yes', 'no']) for (const phase of ['surface', 'unknown']) {
+    const trace = orientationTrace().map((row, index) => index === 0 ? [0, phase, 'front'] : row);
+    const indices = name === 'grab' && state === 'yes' ? [0] : [0, 1, 2];
+    const raw = recognized('直飞', { [name]: { state, evidence: indices.map(frameIndex => ({ frameIndex, observation: '所引用时刻的具体可见表现。' })) } });
+    const original = structuredClone(raw); let calls = 0;
+    const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+      ? upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: raw })) : upstream(content()) });
+    assert.equal(result.analysis.recognizedAction.type, '无法判断');
+    assert.equal(result.analysis.recognizedAction.features[name].state, 'uncertain');
+    assert.equal(result.analysis.recognizedAction.features[name === 'rotation' ? 'grab' : 'rotation'].state, 'no');
+    assert.equal(result.analysis.recognizedAction.evidenceIncomplete, true);
+    assert.deepEqual(result.analysis.recognizedAction.features[name].evidence.map(item => item.time), indices.map(index => input().frames[index].time));
+    assert.deepEqual(raw, original);
+  }
+});
+
+test('unclear unquoted phases do not invalidate sufficient airborne evidence', async () => {
+  const trace = orientationTrace().map((row, index) => index === 0 ? [0, 'unknown', 'unknown'] : row);
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: recognized('转体抓板') })) : upstream(content()) });
+  assert.equal(result.analysis.recognizedAction.type, '转体抓板');
+  assert.equal(result.analysis.recognizedAction.evidenceIncomplete, false);
+});
+
+test('invalid timestamps are not rescued by an otherwise complete all-air trace', async () => {
+  const raw = recognized('转体', { rotation: { state: 'yes', evidence: [1.5, 2.5, 4.2].map(time => ({ time, observation: '整体朝向表现。' })) } });
+  let calls = 0;
+  const result = await analyzeFrames(automaticInput(), { fetchImpl: async () => ++calls === 1
+    ? upstream(recognitionContent(raw)) : upstream(content()) });
+  assert.equal(result.analysis.recognizedAction.features.rotation.state, 'uncertain');
+  assert.deepEqual(result.analysis.recognizedAction.features.rotation.evidence, []);
+  assert.equal(result.analysis.recognizedAction.evidenceIncomplete, true);
+});
+
+test('phase inconsistency preserves a previous training focus instead of grading it or changing it', async () => {
+  const prior = { instruction: '继续保持双手在身前。', check: '腾空时双手仍在身前。', actionType: '直飞' };
+  const trace = orientationTrace().map(([index]) => [index, 'unknown', 'unknown']); let calls = 0;
+  const result = await analyzeFrames(automaticInput({ previousFocus: prior }), { fetchImpl: async () => ++calls === 1
+    ? upstream(JSON.stringify({ orientationTrace: trace, recognizedAction: recognized('直飞') }))
+    : upstream(content({ followUp: { status: 'done', observation: '不应接受这个确认。', time: 1.5 } })) });
+  assert.equal(result.analysis.recognizedAction.type, '无法判断');
+  assert.equal(result.analysis.focusRelation, 'uncertain');
+  assert.equal(result.analysis.followUp.status, 'uncertain');
+  assert.equal(result.analysis.nextJump.instruction, prior.instruction); assert.equal(result.analysis.nextJump.check, prior.check);
 });

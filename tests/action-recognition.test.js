@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import { analyzeFrames } from '../src/analysis-client.js';
 import { deriveRecognizedAction } from '../src/action-recognition.js';
 
-const evidence = (times = [0, 1.5], observation = '身体与雪板保持可见朝向。') => times.map(time => ({ time, observation }));
-const feature = (state, times = [0, 1.5]) => ({ state, evidence: evidence(times) });
+const evidence = (times = [0, 1.5, 3.7], observation = '身体与雪板保持可见朝向。') => times.map(time => ({ time, observation }));
+const feature = (state, times = [0, 1.5, 3.7]) => ({ state, evidence: evidence(times) });
 const features = (rotation = 'no', grab = 'no') => ({ rotation: feature(rotation), grab: feature(grab) });
 const frames = [0, 1.5, 3.7, 4.2].map(time => ({ time }));
 
 test('automatic analysis derives straight air from validated features instead of trusting a claimed rotation label', async () => {
   const jpeg = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224, 1, 2, 255, 217]).toString('base64');
   const modelAnswer = {
+    orientationTrace: frames.map((_,i)=>[i,'air','back']),
     recognizedAction: { type: '转体', description: '模型声称已经转体。', time: 3.7, ...features() },
     stages: ['助滑', '上台', '起跳', '腾空'].map(phase => ({ phase, analysis: '本阶段可见动作表现。', time: null })),
     nextJump: { instruction: '继续保持肩线平稳。', reason: '当前可见肩线平稳。', check: '肩线是否同样平稳。', time: 1.5 },
@@ -33,15 +34,15 @@ test('only two determined features produce one of the four broad practice action
     const result = deriveRecognizedAction(features(rotation, grab), frames);
     assert.equal(result.type, type, rotation + '/' + grab);
     assert.deepEqual(result.features, features(rotation, grab));
-    assert.equal(result.time, 1.5);
+    assert.equal(result.time, 3.7);
     assert.equal(result.otherAction, null);
     assert.equal(result.evidenceIncomplete, false);
   }
 });
 
-test('positive and negative rotation need two distinct frames; one visible grab frame can establish grab presence', () => {
+test('positive and negative rotation need three distinct frames; one visible grab frame can establish grab presence', () => {
   for (const state of ['yes', 'no']) {
-    for (const times of [[], [0]]) {
+    for (const times of [[], [0], [0, 1.5]]) {
       const result = deriveRecognizedAction({ rotation: feature(state, times), grab: feature('no') }, frames);
       assert.equal(result.type, '无法判断');
       assert.equal(result.features.rotation.state, 'uncertain');
@@ -52,7 +53,7 @@ test('positive and negative rotation need two distinct frames; one visible grab 
   const grabbed = deriveRecognizedAction({ rotation: feature('no'), grab: feature('yes', [0]) }, frames);
   assert.equal(grabbed.type, '抓板');
   assert.equal(grabbed.evidenceIncomplete, false);
-  assert.equal(grabbed.time, 1.5);
+  assert.equal(grabbed.time, 3.7);
   const noGrab = deriveRecognizedAction({ rotation: feature('no'), grab: feature('no', [0]) }, frames);
   assert.equal(noGrab.type, '无法判断');
   assert.equal(noGrab.features.grab.state, 'uncertain');
@@ -69,7 +70,7 @@ test('legacy labels, summaries and arbitrary summary timestamps cannot determine
   }
   const result = deriveRecognizedAction({ ...features(), type: '转体', description: '已经转体。', time: 999 }, frames);
   assert.equal(result.type, '直飞');
-  assert.equal(result.time, 1.5);
+  assert.equal(result.time, 3.7);
   assert.match(result.description, /未显示转体特征/);
   assert.ok(!result.description.includes('已经转体'));
 });
@@ -96,24 +97,24 @@ test('any malformed evidence invalidates the feature without retaining selected 
     assert.equal(result.type, '无法判断');
     assert.deepEqual(result.features.rotation, { state: 'uncertain', evidence: [] });
     assert.deepEqual(result.features.grab, feature('no'));
-    assert.equal(result.time, 1.5);
+    assert.equal(result.time, 3.7);
     assert.equal(result.evidenceIncomplete, true);
   }
 });
 
 test('timestamps normalize to supplied frames, including zero, and preserve exact evidence text within bounds', () => {
   const result = deriveRecognizedAction({
-    rotation: { state: 'yes', evidence: [{ time: .001, observation: ' 起跳前朝向可见。 ' }, { time: 1.501, observation: 'x'.repeat(160) }] },
+    rotation: { state: 'yes', evidence: [{ time: .001, observation: ' 起跳前朝向可见。 ' }, { time: 1.501, observation: 'x'.repeat(160) }, { time: 3.701, observation: '整体转向继续可见。' }] },
     grab: feature('no'),
   }, frames);
   assert.equal(result.type, '转体');
-  assert.deepEqual(result.features.rotation.evidence, [{ time: 0, observation: '起跳前朝向可见。' }, { time: 1.5, observation: 'x'.repeat(160) }]);
-  assert.equal(result.time, 1.5);
+  assert.deepEqual(result.features.rotation.evidence, [{ time: 0, observation: '起跳前朝向可见。' }, { time: 1.5, observation: 'x'.repeat(160) }, { time: 3.7, observation: '整体转向继续可见。' }]);
+  assert.equal(result.time, 3.7);
   const zero = deriveRecognizedAction({ rotation: feature('uncertain', [0]), grab: feature('uncertain', []) }, frames);
   assert.equal(zero.time, 0);
-  const inside = deriveRecognizedAction({ rotation: { state: 'no', evidence: evidence([.001001, 1.5]) }, grab: feature('no') }, frames);
+  const inside = deriveRecognizedAction({ rotation: { state: 'no', evidence: evidence([.001001, 1.5, 3.7]) }, grab: feature('no') }, frames);
   assert.equal(inside.type, '直飞');
-  const outside = deriveRecognizedAction({ rotation: { state: 'no', evidence: evidence([.001002, 1.5]) }, grab: feature('no') }, frames);
+  const outside = deriveRecognizedAction({ rotation: { state: 'no', evidence: evidence([.001002, 1.5, 3.7]) }, grab: feature('no') }, frames);
   assert.equal(outside.type, '无法判断');
   assert.deepEqual(outside.features.rotation.evidence, []);
 });
@@ -143,7 +144,7 @@ test('other actions require their own two-frame evidence and cannot silently fal
     const unknown = deriveRecognizedAction({ ...features(), otherAction: invalid }, frames);
     assert.equal(unknown.type, '无法判断');
     assert.equal(unknown.otherAction, null);
-    assert.equal(unknown.time, 1.5);
+    assert.equal(unknown.time, 3.7);
     assert.equal(unknown.evidenceIncomplete, true);
   }
   assert.equal(deriveRecognizedAction({ ...features(), otherAction: null }, frames).type, '直飞');
@@ -179,4 +180,15 @@ test('derivation leaves model input untouched and produces independent evidence 
   assert.deepEqual(second.features.rotation, original.rotation);
   assert.deepEqual(second.features.grab, original.grab);
   assert.deepEqual(second.otherAction, original.otherAction);
+});
+
+test('negative grab requires three distinct supplied frames, while a visible grab still needs only one', () => {
+  const missingMiddle = deriveRecognizedAction({ rotation: feature('no'), grab: feature('no', [0, 3.7]) }, frames);
+  assert.equal(missingMiddle.type, '无法判断');
+  assert.equal(missingMiddle.features.grab.state, 'uncertain');
+  assert.equal(missingMiddle.evidenceIncomplete, true);
+  const complete = deriveRecognizedAction(features('no', 'no'), frames);
+  assert.equal(complete.type, '直飞');
+  const visibleGrab = deriveRecognizedAction({ rotation: feature('no'), grab: feature('yes', [1.5]) }, frames);
+  assert.equal(visibleGrab.type, '抓板');
 });

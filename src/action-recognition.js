@@ -29,7 +29,7 @@ function normalizeFeature(raw, timestamps, minimumYes) {
   if (evidence === null) return incomplete();
   const knownState = FEATURE_STATES.includes(raw.state);
   const state = knownState ? raw.state : 'uncertain';
-  const minimum = state === 'yes' ? minimumYes : state === 'no' ? 2 : 0;
+  const minimum = state === 'yes' ? minimumYes : state === 'no' ? 3 : 0;
   const enoughEvidence = evidence.length >= minimum;
   return { feature: { state: enoughEvidence ? state : 'uncertain', evidence }, incomplete: !knownState || !enoughEvidence };
 }
@@ -58,7 +58,7 @@ export function deriveRecognizedAction(raw, frames) {
   const timestamps = Array.isArray(frames)
     ? frames.filter(frame => object(frame) && typeof frame.time === 'number' && Number.isFinite(frame.time)).map(frame => frame.time)
     : [];
-  const normalizedRotation = normalizeFeature(input.rotation, timestamps, 2);
+  const normalizedRotation = normalizeFeature(input.rotation, timestamps, 3);
   const normalizedGrab = normalizeFeature(input.grab, timestamps, 1);
   const rotation = normalizedRotation.feature, grab = normalizedGrab.feature;
   const features = { rotation, grab };
